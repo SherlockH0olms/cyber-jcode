@@ -12,11 +12,18 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from cyber.console import Backend, Console, cells, clean, fit, parse_result, read_json
+from cyber.console import (Backend, Console, ProgressDisplay, RunProgress, cells,
+                           clean, display_tool, fit, forward_command, main, parse_result,
+                           read_json, write_json)
 from cyber.install import import_settings, link_launcher, snapshot
 
 
-FINAL = '[CYBER_RESULT]\n{"status":"ok","findings":["Dosya incelendi."],"flags":["THM{test_only}"],"next":[]}\n[/CYBER_RESULT]'
+FINAL = '[CYBER_RESULT]\n{"status":"ok","findings":["File inspected."],"flags":["THM{test_only}"],"next":[]}\n[/CYBER_RESULT]'
+BG_OUTPUT = ("Background task finished.\n\nTask: task-123\nName: HIDDEN_INTERNAL_TASK_LABEL\n"
+             "Tool: bash\nStatus: completed\nSession: HIDDEN_SESSION\nDuration: 29.26s\n"
+             "Exit code: 0\nNotify: true\nWake: false\nRecent events:\n- Completed\n"
+             "\nOutput preview:\n```text\nPORT STATE SERVICE\n445/tcp open microsoft-ds\n"
+             "--- Command finished with exit code: 0 ---\n```\n")
 FAKE_ENGINE = '''#!/usr/bin/env python3
 import json, os, sys, time
 from pathlib import Path
@@ -41,14 +48,25 @@ if mode == "error":
     sys.exit(1)
 if mode == "missing_done":
     sys.exit(0)
-emit({"type":"tool_done","name":"bash","output":"scan output\\nTHM{test_only}","error":False})
+if "--tool-profile" in sys.argv and sys.argv[sys.argv.index("--tool-profile") + 1] == "none":
+    emit({"type":"done","session_id":"greeting_session","text":"[CYBER_RESULT]" + json.dumps({"status":"ok","findings":["Hello there."],"flags":[],"next":[]}) + "[/CYBER_RESULT]"})
+    sys.exit(0)
+emit({"type":"tool_start","id":"scan","name":"bash"})
+emit({"type":"tool_exec","id":"scan","name":"bash"})
+if mode == "delayed":
+    time.sleep(1.2)
+if mode == "background":
+    emit({"type":"tool_done","id":"scan","name":"bash","output":"Tool 'bash' was moved to background automatically after 3 seconds (task_id: bg123).\\n\\nHIDDEN_SYSTEM_GUIDANCE"})
+    time.sleep(1.2)
+    emit({"type":"tool_done","id":"wait","name":"bg","output":"Background task finished.\\n\\nTask: bg123\\nTool: bash\\nStatus: completed\\n\\nOutput preview:\\n```text\\nscan output\\n```\\n"})
+emit({"type":"tool_done","id":"scan","name":"bash","output":"scan output\\nTHM{test_only}","error":False})
 emit({"type":"tool_done","name":"read","output":"X" * 100000,"error":False})
-emit({"type":"done","session_id":"session_test","text":"HIDDEN_REASONING_AND_CHAT\\n[CYBER_RESULT]\\n" + json.dumps({"status":"ok","findings":["Dosya incelendi."],"flags":["THM{test_only}","THM{invented}"],"next":[]}) + "\\n[/CYBER_RESULT]"})
+emit({"type":"done","session_id":"session_test","text":"HIDDEN_REASONING_AND_CHAT\\n[CYBER_RESULT]\\n" + json.dumps({"status":"ok","findings":["File inspected."],"flags":["THM{test_only}","THM{invented}"],"next":[]}) + "\\n[/CYBER_RESULT]"})
 '''
 
 
 def args(**overrides):
-    values = dict(target=None, provider=None, model=None, cwd=None, no_color=True,
+    values = dict(target=None, provider=None, model=None, provider_profile=None, cwd=None, no_color=True,
                   full_output=False, menu=False, check=False, run=None)
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -57,7 +75,7 @@ def args(**overrides):
 class RenderingTests(unittest.TestCase):
     def test_only_explicit_final_result_survives(self):
         data = parse_result("secret planning\n" + FINAL + "\nsecret conversation")
-        self.assertEqual(data["findings"], ["Dosya incelendi."])
+        self.assertEqual(data["findings"], ["File inspected."])
         self.assertNotIn("secret", json.dumps(data))
         fallback = parse_result("No markers. Hidden conversational explanation.")
         self.assertEqual(fallback["status"], "partial")
@@ -90,6 +108,72 @@ class RenderingTests(unittest.TestCase):
             for row in output.getvalue().splitlines():
                 self.assertLessEqual(cells(row), 24)
 
+    def test_progress_rendering_is_sparse_and_fits_terminal_cells(self):
+        output = io.StringIO()
+        progress = RunProgress(active={"id": "旗" * 20})
+        with contextlib.redirect_stdout(output):
+            display = ProgressDisplay(24)
+            for second in range(31):
+                progress.elapsed = second
+                display(progress)
+            display.finish()
+        self.assertEqual(len(output.getvalue().splitlines()), 4)
+        self.assertTrue(all(cells(row) <= 24 for row in output.getvalue().splitlines()))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), patch.object(output, "isatty", return_value=True):
+            display = ProgressDisplay(24)
+            display(progress)
+            display.finish()
+        self.assertTrue(output.getvalue().startswith("\r"))
+        self.assertTrue(output.getvalue().endswith("\n"))
+
+    def test_background_output_unwraps_actual_results_and_keeps_failures(self):
+        result = display_tool({"name": "bg", "output": BG_OUTPUT})
+        self.assertEqual(result, {"name": "bash", "error": False,
+                                 "output": "PORT STATE SERVICE\n445/tcp open microsoft-ds"})
+        self.assertIsNone(display_tool({"name": "bash", "output":
+            "Command started in background as requested.\n\nTask ID: test123\n"}))
+        self.assertIsNone(display_tool({"name": "bash", "output":
+            "Tool 'bash' was moved to background automatically after 3 seconds (task_id: test123).\n"}))
+        failed = display_tool({"name": "bg", "output": BG_OUTPUT.replace("Exit code: 0", "Exit code: 1")})
+        self.assertTrue(failed["error"])
+        self.assertIn("445/tcp", failed["output"])
+        unknown = "Actual command output mentions Output preview: and should survive."
+        self.assertEqual(display_tool({"name": "bash", "output": unknown})["output"], unknown)
+
+    def test_result_summary_precedes_outputs_without_losing_long_findings(self):
+        finding = "TCP ports: 80, 135, 139, 445, 5040, 5985, 47001, 49666, 49667; Windows 11/Server 2025 Build 26100."
+        with tempfile.TemporaryDirectory() as folder:
+            console = Console(Path(folder), args())
+            console.width = 40
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                console.show_result({"target": "10.10.10.10", "elapsed": 958.6,
+                    "summary": {"status": "ok", "findings": [finding]},
+                    "tools": [{"name": "bg", "output": BG_OUTPUT}, {"name": "bash", "output":
+                        "HTTP/1.1 200 OK\nContent-Type: text/html\n\n<!doctype html><html>\n"
+                        "<title>Lab application</title>\n<style>HIDDEN_PAGE_SOURCE</style></html>"}]})
+            rendered = output.getvalue()
+            for row in rendered.splitlines():
+                self.assertLessEqual(cells(row), 40)
+            self.assertLess(rendered.index("TCP ports"), rendered.index("TOOL OUTPUTS"))
+            for token in ("49667", "26100", "445/tcp", "Lab application", "15m 58s"):
+                self.assertIn(token, rendered)
+            for forbidden in ("HIDDEN_INTERNAL", "HIDDEN_SESSION", "Recent events", "HIDDEN_PAGE_SOURCE"):
+                self.assertNotIn(forbidden, rendered)
+
+    def test_written_notes_remain_visible_as_real_tool_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            console = Console(Path(folder), args())
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                console.show_result({"summary": {"status": "ok", "findings": []},
+                    "tools": [{"name": "write", "output": "Created /tmp/lab/notes.md (3 lines):\n"
+                               "1+ # Service discovery\n2+ | Port | Service |\n3+ | 445/tcp | SMB |\n"
+                               "\nFile diff:\n```diff\n+| 445/tcp | SMB |\n```"}]})
+            for text in ("notes.md", "Service discovery", "Port | Service", "445/tcp | SMB"):
+                self.assertIn(text, output.getvalue())
+            self.assertEqual(output.getvalue().count("445/tcp | SMB"), 1)
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -125,7 +209,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_error_is_short_and_does_not_leak_credentials(self):
         with patch.dict(os.environ, {"CYBER_TEST_MODE":"error"}):
             result = await self.backend.run("task", self.folder / "lab", None, "auto", "")
-        self.assertIn("doğrulanamadı", result.error)
+        self.assertIn("authentication failed", result.error)
         self.assertNotIn("SECRET_TOKEN", result.error)
 
     async def test_previously_observed_flag_can_be_recalled(self):
@@ -138,6 +222,32 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             result = await self.backend.run("task", self.folder / "lab", None, "auto", "")
         self.assertIsNotNone(result.error)
 
+    async def test_progress_continues_while_tool_waits_and_hides_payloads(self):
+        snapshots = []
+        def observe(progress):
+            snapshots.append((progress.elapsed, progress.row()))
+        with patch.dict(os.environ, {"CYBER_TEST_MODE": "delayed"}):
+            result = await self.backend.run("task", self.folder / "lab", None,
+                                            "auto", "", progress=observe)
+        self.assertIsNone(result.error)
+        self.assertTrue(any(elapsed >= 1 and "Running: bash" in row for elapsed, row in snapshots))
+        self.assertTrue(any("1 done / 0 active" in row for _, row in snapshots))
+        self.assertTrue(any("2 done / 0 active" in row for _, row in snapshots))
+        self.assertNotIn("HIDDEN", str(snapshots))
+        size = len(snapshots)
+        await asyncio.sleep(1.1)
+        self.assertEqual(len(snapshots), size, "Ticker must finish with its process")
+
+    async def test_background_tool_stays_active_until_completion(self):
+        snapshots = []
+        with patch.dict(os.environ, {"CYBER_TEST_MODE": "background"}):
+            result = await self.backend.run("task", self.folder / "lab", None,
+                "auto", "", progress=lambda progress: snapshots.append((progress.elapsed, progress.row())))
+        self.assertIsNone(result.error)
+        self.assertTrue(any(elapsed >= 1 and "Running: bash" in row and "1 active" in row
+                            for elapsed, row in snapshots))
+        self.assertIn("0 active", snapshots[-1][1])
+        self.assertNotIn("HIDDEN_SYSTEM", str(snapshots))
     async def test_cancel_terminates_only_owned_process(self):
         with patch.dict(os.environ, {"CYBER_TEST_MODE":"hang"}):
             task = asyncio.create_task(self.backend.run("task", self.folder / "lab", None, "auto", ""))
@@ -156,6 +266,81 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConsoleTests(unittest.TestCase):
+    def test_greeting_calls_model_without_tools_or_changing_lab_state(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            binary = folder / "fake-engine"
+            binary.write_text(FAKE_ENGINE)
+            binary.chmod(0o755)
+            console = Console(folder / "state", args())
+            console.backend = Backend(console.state, binary)
+            console.target = "10.10.10.10"
+            console.session_id = "existing_lab_session"
+            console.last_path = "existing_result"
+            console.verified_flags = ["THM{already_verified}"]
+            console.persist()
+            before = (console.state / "console.json").read_bytes()
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertTrue(console.execute("HI!"))
+            self.assertIn("[+] Hello there.", output.getvalue())
+            self.assertNotIn("File inspected", output.getvalue())
+            invocation = read_json(console.state / "engine/invocation.json")
+            self.assertIn("--tool-profile", invocation["argv"])
+            self.assertIn("none", invocation["argv"])
+            self.assertNotIn("--resume", invocation["argv"])
+            self.assertNotIn(console.target, invocation["argv"][-1])
+            self.assertEqual(invocation["env"]["JCODE_RUN_AUTO_POKE"], "0")
+            self.assertEqual((console.state / "console.json").read_bytes(), before)
+            self.assertEqual(console.session_id, "existing_lab_session")
+            self.assertFalse((console.state / "results").exists())
+
+    def test_provider_cli_preserves_arguments_stdin_and_isolates_default(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            write_json(state / "console.json", {"target": "10.10.10.10", "provider": "auto",
+                       "model": "old-model", "profile": "old-profile", "session_id": "lab",
+                       "verified_flags": ["THM{prior}"]})
+            command = ["provider", "add", "my-api", "--base-url", "http://localhost:1234/v1",
+                       "--model", "new-model", "--api-key-stdin", "--set-default"]
+            with patch("cyber.console.subprocess.run") as run:
+                run.return_value.returncode = 0
+                self.assertEqual(forward_command(state, command), 0)
+            self.assertEqual(run.call_args.args[0][-len(command):], command)
+            self.assertNotIn("stdin", run.call_args.kwargs)
+            self.assertEqual(run.call_args.kwargs["env"]["JCODE_HOME"], str(state / "engine"))
+            self.assertEqual(run.call_args.kwargs["env"]["XDG_CONFIG_HOME"], str(state / "engine/config"))
+            settings = read_json(state / "console.json")
+            self.assertEqual(settings["target"], "10.10.10.10")
+            self.assertEqual(settings["model"], "")
+            self.assertEqual(settings["profile"], "")
+            self.assertIsNone(settings["session_id"])
+            before = (state / "console.json").read_bytes()
+            with patch("cyber.console.subprocess.run") as run:
+                run.return_value.returncode = 1
+                self.assertEqual(forward_command(state, command), 1)
+            self.assertEqual((state / "console.json").read_bytes(), before)
+
+    def test_provider_help_dispatches_without_starting_console(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"CYBER_JCODE_HOME": folder}):
+            with patch("cyber.console.forward_command", return_value=0) as forward:
+                self.assertEqual(main(["provider", "add", "--help"]), 0)
+            self.assertEqual(forward.call_args.args, (Path(folder), ["provider", "add", "--help"]))
+
+    def test_model_header_uses_private_defaults_and_selected_profile(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            (state / "engine").mkdir()
+            (state / "engine/config.toml").write_text(
+                '[provider]\ndefault_provider="my-api"\ndefault_model="current-model"\n'
+                '[providers.other]\ndefault_model="other-model"\napi_key="HIDDEN_KEY"\n')
+            console = Console(state, args())
+            self.assertEqual(console.model_label(), "current-model")
+            console.profile = "other"
+            self.assertEqual(console.model_label(), "other-model")
+            console.model = "explicit-model"
+            self.assertEqual(console.model_label(), "explicit-model")
+
     def test_existing_launcher_is_preserved(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "cyber-jcode"
@@ -177,6 +362,21 @@ class ConsoleTests(unittest.TestCase):
                 self.assertEqual(console.loop(), 0)
             self.assertEqual(execute.call_count, 2)
             self.assertEqual(execute.call_args_list[1].args[0], "özel görev")
+
+    def test_all_menu_tasks_and_free_prompts_use_the_common_execution_flow(self):
+        with tempfile.TemporaryDirectory() as folder:
+            sample = Path(folder) / "sample.txt"
+            sample.write_text("local lab note")
+            console = Console(Path(folder) / "state", args(target="10.10.10.10"))
+            choices = ["2", "3", "4", "5", "6", str(sample), "inspect another service", "0"]
+            with patch.object(console, "ask", side_effect=choices), \
+                    patch.object(console, "execute", return_value=True) as execute, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(console.loop(), 0)
+            self.assertEqual(execute.call_count, 6)
+            self.assertEqual([call.args[1] for call in execute.call_args_list[:5]],
+                             ["SERVICE DISCOVERY", "WEB DISCOVERY", "VULNERABILITY REVIEW", "FLAG SEARCH", "FILE"])
+            self.assertEqual(execute.call_args_list[-1].args[0], "inspect another service")
 
     def test_target_change_resets_session(self):
         with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):

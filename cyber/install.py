@@ -60,9 +60,9 @@ def import_settings(home: Path, state: Path):
 def link_launcher(link: Path, launcher: Path):
     if link.is_symlink():
         if link.resolve() != launcher.resolve():
-            raise ValueError("cyber-jcode komutu başka bir kuruluma ait; üzerine yazılmadı.")
+            raise ValueError("The cyber-jcode command belongs to another installation; not overwritten.")
     elif link.exists():
-        raise ValueError("cyber-jcode komutu zaten var; üzerine yazılmadı.")
+        raise ValueError("The cyber-jcode command already exists; not overwritten.")
     else:
         link.symlink_to(launcher)
 
@@ -70,7 +70,7 @@ def link_launcher(link: Path, launcher: Path):
 def install(home: Path, state: Path, build: bool = True):
     protected = [(home / name).resolve() for name in (".jcode", ".config/jcode")]
     if any(state.resolve().is_relative_to(path) or path.is_relative_to(state.resolve()) for path in protected):
-        raise ValueError("Cyber-Jcode için ayrı bir veri klasörü seç.")
+        raise ValueError("Choose a separate Cyber-Jcode data directory.")
     private_dir(state)
     baseline = snapshot(home)
     if not (state / "original-install-snapshot.json").exists():
@@ -80,7 +80,7 @@ def install(home: Path, state: Path, build: bool = True):
                         "--bin", "jcode", "-j", "2"], cwd=ROOT, check=True)
     binary = ROOT / "target/selfdev/jcode"
     if not binary.is_file():
-        raise ValueError("Önce kaynak motorunu derle: cargo build --profile selfdev --bin jcode")
+        raise ValueError("Build the source engine first: cargo build --profile selfdev --bin jcode")
     import_settings(home, state)
     for path in (state / "engine", state / "engine/config/jcode", state / "run", state / "results"):
         private_dir(path)
@@ -91,18 +91,18 @@ def install(home: Path, state: Path, build: bool = True):
     link = bindir / "cyber-jcode"
     link_launcher(link, launcher)
     if snapshot(home) != baseline:
-        raise ValueError("Mevcut jcode dosyaları değişti; doğrulama başarısız.")
-    print("[+] cyber-jcode kuruldu.")
-    print("[+] Bağlantı ayarları bağımsız kopyalandı.")
-    print("[+] Mevcut jcode değişmedi.")
+        raise ValueError("Existing jcode files changed; verification failed.")
+    print("[+] cyber-jcode installed.")
+    print("[+] Connection settings copied independently.")
+    print("[+] Existing jcode unchanged.")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Bağımsız Cyber-Jcode kurulumu")
+    parser = argparse.ArgumentParser(description="Independent Cyber-Jcode setup")
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--verify-original", action="store_true")
     parser.add_argument("--link-system", action="store_true",
-                        help="Yalnızca /usr/local/bin/cyber-jcode bağlantısını oluştur (root)")
+                        help="Create only /usr/local/bin/cyber-jcode (root)")
     args = parser.parse_args()
     os.umask(0o077)
     home = Path.home()
@@ -110,13 +110,13 @@ def main():
     try:
         if args.link_system:
             link_launcher(Path("/usr/local/bin/cyber-jcode"), ROOT / "cyber-jcode")
-            print("[+] /usr/local/bin/cyber-jcode hazır.")
+            print("[+] /usr/local/bin/cyber-jcode ready.")
         elif args.verify_original:
             baseline = read_json(state / "original-install-snapshot.json")
             if not baseline or snapshot(home) != baseline:
-                print("[!] Mevcut kurulum doğrulaması başarısız.")
+                print("[!] Existing installation verification failed.")
                 return 1
-            print("[+] Mevcut jcode dosyaları ve bağlantıları değişmedi.")
+            print("[+] Existing jcode files and links unchanged.")
         else:
             install(home, state, build=not args.skip_build)
         return 0

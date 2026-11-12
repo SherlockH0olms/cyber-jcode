@@ -1,60 +1,101 @@
 # Cyber-Jcode
 
-Klasik terminal menüsüyle çalışan, Jcode'un gerçek araç ve model motorunu
-kullanan bağımsız TryHackMe/CTF lab arayüzü.
+An independent English terminal console for TryHackMe/CTF labs, using Jcode's
+real model and tool engine behind a classic numbered menu.
 
 ```bash
 cyber-jcode
 ```
 
-Açılışta ASCII banner ve numaralı menü görünür. `1` ile hedefini ayarla;
-`2` servis keşfi, `3` web keşfi, `4` zafiyet inceleme, `5` flag arama,
-`6` yerel dosya inceleme çalıştırır. Menüde olmayan bir görev için aynı
-`cyber >` satırına doğrudan metin yaz.
+Set the target with `1`. Choose `2` for service discovery, `3` for web discovery,
+`4` for vulnerability review, `5` for flag search, or `6` for local file analysis.
+Enter any other task directly at `cyber >`. Type `hi`, `hello`, `hey` or `ping`
+for a short **real model response** without tools or changes to your lab session.
 
-Araçlar arka planda çalışır. Araç çıktıları ve en fazla dört kısa bulgu işin
-sonunda gösterilir. Sohbet, planlama, düşünce ve akış metinleri gösterilmez.
-Flaglar yalnızca araç çıktısında gözlemlenmişlerse `[FLAG]` olarak etiketlenir.
+During a task, one status row shows elapsed time, the current phase or tool name,
+and completed/active tool counts. Redirected output gets a status line every
+ten seconds. This is activity information, not a completion estimate. Reasoning,
+chat streams and tool inputs stay hidden. Up to four short English findings
+appear first, followed by actual tool outputs, including written notes and
+port/service tables. Background task envelopes are removed; their actual
+output is retained. HTML source gets a compact preview. Use `--full-output`
+to show all captured output blocks and lines. `save` gives the raw captured
+output file. Only verified flags receive the `[FLAG]` label.
 
-`menu` menüyü, `sonuc` son sonucu gösterir. `kaydet`, tam araç çıktılarının
-bulunduğu yerel JSON dosyasının yolunu verir. `temizle` ekranı temizler.
-`9` yeni oturum açar; `0` çıkar. İşlem sırasında `Ctrl+C` motoru durdurur ve
-menüye döner. Hedef değişince önceki hedefin oturumu kullanılmaz.
+`menu` shows the menu; `result` shows the last result; `save` prints the local
+JSON path containing full tool outputs; `clear` clears the screen. `9` or `new`
+starts a new session; `0` exits. `Ctrl+C` stops the current operation and returns
+to the console. Changing targets resets the lab session. Existing Turkish
+command aliases remain accepted.
 
-`8` ile sağlayıcı/model seçimi, bağlantı kontrolü, sağlayıcı girişi ve model
-listesi açılır. Model listesi Jcode'un sağlayıcı keşfinden alınır.
+`8` opens provider/model selection, connection checks, login and model lists.
+The model list comes from Jcode's existing provider discovery.
 
 ```bash
 cyber-jcode --check
 cyber-jcode --target 10.10.10.10
-cyber-jcode --run 'Bu dosyayı incele: /tmp/lab-notes.txt'
-cyber-jcode --model MODEL_ADI
+cyber-jcode --run 'Inspect /tmp/lab-notes.txt'
+cyber-jcode --model MODEL_ID
+cyber-jcode --provider-profile my-api
 cyber-jcode --full-output
 ```
 
-Kurulum:
+## OpenAI-compatible connection
+
+The first installation copies existing Jcode model settings and credentials
+into Cyber-Jcode's private directories. A working copied connection needs no
+reconfiguration. Later changes to original Jcode settings are not synchronized.
+
+Cyber-Jcode forwards the existing Jcode configuration commands with its private
+environment. It uses Jcode's provider writer, authentication and option handling.
+Add a new connection **from your shell**, after exiting `cyber >`:
+
+```bash
+python3 -c 'import getpass; print(getpass.getpass("API key: "))' | \
+  cyber-jcode provider add my-api \
+  --base-url https://gateway.example/v1 \
+  --model MODEL_ID \
+  --api-key-stdin \
+  --set-default
+cyber-jcode
+```
+
+Replace the URL and model ID with your gateway's values. `--set-default` selects
+the new profile for the next console launch and clears old frontend model/session
+overrides. Use `--overwrite` to replace an existing profile. For a local endpoint
+that requires no key, use `--no-api-key` instead of `--api-key-stdin`.
+
+```bash
+cyber-jcode provider add --help
+cyber-jcode provider current
+cyber-jcode provider list
+cyber-jcode model list --json
+cyber-jcode auth status
+```
+
+## Installation and isolation
 
 ```bash
 cd ~/cyber-jcode
 python3 cyber/install.py
 ```
 
-Motor, bu depodan `target/selfdev/jcode` olarak derlenir. Kurulum yalnızca
-`~/.local/bin/cyber-jcode` bağlantısını oluşturur. Bu dizin PATH'te yoksa
-`sudo python3 cyber/install.py --link-system` ayrıca
-`/usr/local/bin/cyber-jcode` bağlantısını oluşturur; mevcut bir komutu ezmez.
-İlk kurulumda mevcut model
-ayarları ve kimlik bilgileri özel izinlerle **kopyalanır**; sonraki kurulumlar
-bu kopyaları ezmez. `~/.local/bin/jcode` ve `~/.jcode` değiştirilmez.
+Requires Python 3.11+ and the Rust toolchain for the initial engine build.
+The engine is built from this repository as `target/selfdev/jcode`. The installer
+creates `~/.local/bin/cyber-jcode`. If that directory is absent from PATH,
+`sudo python3 cyber/install.py --link-system` additionally links
+`/usr/local/bin/cyber-jcode`; it refuses to overwrite a different existing command.
+Original Jcode settings, credentials and launcher are preserved.
 
-Cyber-Jcode verileri `~/.cyber-jcode` altında tutulur: `engine` model ayarları
-ve Jcode oturumları, `run` özel soket, `labs` lab çalışma klasörleri, `results`
-araç çıktıları ve kısa sonuçlar. Özel bir lab klasörü için `--cwd PATH` kullan.
-Özel veri klasörü için `CYBER_JCODE_HOME` kullanılabilir. Kaynak motorunun
-oturum kayıtları arka planda kalır; ön yüz sonuç kayıtlarına sohbet/düşünce
-akışı yazılmaz. Gerçek ana dizin değişkeni değiştirilmez.
+Cyber-Jcode data lives in `~/.cyber-jcode`: `engine` holds private model settings
+and backend sessions, `run` holds the isolated socket, `labs` holds workspaces,
+and `results` holds tool output and short results. Use `--cwd PATH` for a custom
+lab workspace or `CYBER_JCODE_HOME` for a separate data directory. Backend session
+logs stay in the background; frontend result files exclude reasoning/chat streams.
+The actual home environment variable is preserved.
 
-Kontroller:
+Python/interface updates take effect when the console is reopened. An operation
+already running continues with the code loaded by that process.
 
 ```bash
 python3 -m unittest cyber.test_console -v
