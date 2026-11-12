@@ -31,11 +31,10 @@ An existing older Rust toolchain can be updated with `rustup update stable`.
 The source engine has been built with Rust 1.95.0. Python report dependencies
 are installed with `apt` above, so no system-wide `pip` installation is needed.
 
-Clone **your published Cyber-Jcode repository**. Replace `YOUR_GITHUB_USER`
-with its actual owner; this URL is a placeholder:
+Clone the Cyber-Jcode repository:
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USER/cyber-jcode.git ~/cyber-jcode
+git clone https://github.com/SherlockH0olms/cyber-jcode.git ~/cyber-jcode
 cd ~/cyber-jcode
 python3 cyber/install.py
 export PATH="$HOME/.local/bin:$PATH"
