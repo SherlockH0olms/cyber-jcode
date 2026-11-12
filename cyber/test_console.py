@@ -322,7 +322,10 @@ class ConsoleTests(unittest.TestCase):
             self.assertEqual((state / "console.json").read_bytes(), before)
 
     def test_provider_help_dispatches_without_starting_console(self):
-        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"CYBER_JCODE_HOME": folder}):
+        # main() rejects a state directory inside the protected ~/.jcode tree, so a
+        # parent Jcode session (TMPDIR=~/.jcode/scratch) must not leak into the test.
+        with tempfile.TemporaryDirectory(dir="/tmp") as folder, \
+                patch.dict(os.environ, {"CYBER_JCODE_HOME": folder}):
             with patch("cyber.console.forward_command", return_value=0) as forward:
                 self.assertEqual(main(["provider", "add", "--help"]), 0)
             self.assertEqual(forward.call_args.args, (Path(folder), ["provider", "add", "--help"]))
