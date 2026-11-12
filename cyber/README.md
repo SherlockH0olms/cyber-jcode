@@ -9,7 +9,11 @@ cyber-jcode
 
 Set the target with `1`. Choose `2` for service discovery, `3` for web discovery,
 `4` for vulnerability review, `5` for flag search, or `6` for local file analysis.
-Enter any other task directly at `cyber >`. Type `hi`, `hello`, `hey` or `ping`
+Choose `10` for a **full pentest engagement**: seven methodology phases (recon,
+service enumeration, web analysis, vulnerability verification, exploitation,
+privilege escalation, post-exploitation) run in order toward the highest
+privilege, with an enterprise-English **DOCX report** at the end. Enter any other
+task directly at `cyber >`. Type `hi`, `hello`, `hey` or `ping`
 for a short **real model response** without tools or changes to your lab session.
 
 During a task, one status row shows elapsed time, the current phase or tool name,
@@ -35,10 +39,41 @@ The model list comes from Jcode's existing provider discovery.
 cyber-jcode --check
 cyber-jcode --target 10.10.10.10
 cyber-jcode --run 'Inspect /tmp/lab-notes.txt'
+cyber-jcode --pentest
 cyber-jcode --model MODEL_ID
 cyber-jcode --provider-profile my-api
 cyber-jcode --full-output
 ```
+
+## Full pentest engagement
+
+`10` (or `--pentest`) runs an authorized-lab engagement through seven ordered
+phases. Each phase is a real agent turn: prior phase results travel forward as
+engagement context, and the console asks before each next phase (Enter or y =
+run, n = stop and report, s = skip that phase). Ctrl+C mid-phase keeps the
+partial tool outputs and records the phase as partial; the engagement report is
+still produced. Every phase must report only tool-verified vulnerabilities, each
+with title, severity, category, evidence, impact and remediation. The goal is
+maximum progress to root/SYSTEM, not the first flag; the report documents the
+full attack surface and chain.
+
+During each phase the console streams every tool invocation and its result as it
+completes (bash commands are shown with their command line). The full recorded
+transcript, per-tool command/output pairs and evidence identifiers are kept in
+the engagement JSON, and the DOCX appendix reproduces each recorded tool result.
+
+The engagement ends with `~/.cyber-jcode/results/pentest-<stamp>.json` (all
+data), `~/.cyber-jcode/reports/pentest-<stamp>.docx` and a copy on the Windows
+Desktop. The report contains: cover, executive summary, methodology table,
+findings overview and detail tables sorted by severity (with evidence-linked
+validation and reproduction steps), tool activity log, embedded terminal-style
+evidence images per phase, conclusion with observed flags, and an appendix with
+each recorded tool invocation and output. Requirements: `pip install python-docx
+pillow`.
+
+The installer also copies `pentest.txt` and `dehset_pentest_araclari.txt` from
+the Windows Desktop into `~/.cyber-jcode/references` (once; never overwritten).
+Full pentest phases reference these handbooks as optional methodology guidance.
 
 ## OpenAI-compatible connection
 

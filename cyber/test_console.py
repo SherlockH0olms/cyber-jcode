@@ -12,10 +12,14 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from cyber.console import (Backend, Console, ProgressDisplay, RunProgress, cells,
+from cyber.console import (Backend, Console, ProgressDisplay, RunProgress, TASKS,
+                           PENTEST_PHASES, cells,
                            clean, display_tool, fit, forward_command, main, parse_result,
                            read_json, write_json)
-from cyber.install import import_settings, link_launcher, snapshot
+from cyber.install import import_references, import_settings, link_launcher, snapshot
+from cyber.report import (build_report, parse_engagement_findings,
+                          render_terminal_png)
+from PIL import Image
 
 
 FINAL = '[CYBER_RESULT]\n{"status":"ok","findings":["File inspected."],"flags":["THM{test_only}"],"next":[]}\n[/CYBER_RESULT]'
@@ -282,7 +286,8 @@ class ConsoleTests(unittest.TestCase):
             before = (console.state / "console.json").read_bytes()
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertTrue(console.execute("HI!"))
+                # A greeting returns None (no task report) but must not fail.
+                self.assertIsNone(console.execute("HI!"))
             self.assertIn("[+] Hello there.", output.getvalue())
             self.assertNotIn("File inspected", output.getvalue())
             invocation = read_json(console.state / "engine/invocation.json")
@@ -355,13 +360,15 @@ class ConsoleTests(unittest.TestCase):
     def test_connection_check_requires_tool_evidence(self):
         with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):
             console = Console(Path(folder), args())
-            with patch.object(console, "execute", return_value=True):
+            # execute() reports ok, but no tool output actually contains CYBER_OK.
+            with patch.object(console, "execute", return_value={"error": None, "summary": {"status": "ok"},
+                                                                 "tools": [{"name": "bash", "output": "unrelated", "error": False}]}):
                 self.assertFalse(console.check_connection())
 
     def test_number_menu_and_free_prompt_share_input(self):
         with tempfile.TemporaryDirectory() as folder:
             console = Console(Path(folder), args())
-            with patch.object(console, "ask", side_effect=["1", "10.10.10.10", "2", "özel görev", "123", "0"]), patch.object(console, "execute", return_value=True) as execute, contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(console, "ask", side_effect=["1", "10.10.10.10", "2", "özel görev", "123", "0"]), patch.object(console, "execute", return_value={"error": None, "summary": {"status": "ok"}}) as execute, contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(console.loop(), 0)
             self.assertEqual(execute.call_count, 2)
             self.assertEqual(execute.call_args_list[1].args[0], "özel görev")
@@ -403,7 +410,7 @@ class ConsoleTests(unittest.TestCase):
             console.backend = Backend(console.state, binary)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertTrue(console.execute("inspect local file"))
+                self.assertTrue(bool(console.execute("inspect local file")))
             saved = Path(console.last_path).read_text()
             for forbidden in ("HIDDEN_REASONING", "HIDDEN_STDERR", "HIDDEN_THINK", "HIDDEN_TOOL_INPUT", "HIDDEN_STATUS", "THM{invented}"):
                 self.assertNotIn(forbidden, saved + output.getvalue())
@@ -426,6 +433,275 @@ class ConsoleTests(unittest.TestCase):
             import_settings(home, state)
             self.assertIn("independent", target.read_text())
             self.assertEqual(snapshot(home), before)
+
+    def test_pentest_prompt_includes_handbook_references(self):
+        # The pentest policy points the engine at the copied handbooks; present
+        # copies must appear in the prompt, missing ones must not break it.
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            references = state / "references"
+            references.mkdir(parents=True)
+            (references / "pentest.txt").write_text("handbook body")
+            console = Console(state, args())
+            console.target = "10.10.10.10"
+            prompt = console.prompt("phase task", "PENTEST 1/7: RECON")
+            self.assertIn(str(references / "pentest.txt"), prompt)
+            self.assertNotIn("dehset", prompt.split("USER TASK")[0])
+
+    def test_reference_import_copies_once_and_never_overwrites(self):
+        with tempfile.TemporaryDirectory() as folder:
+            sources = Path(folder) / "desktop"
+            sources.mkdir()
+            (sources / "pentest.txt").write_text("v1 handbook\n")
+            (sources / "dehset_pentest_araclari.txt").write_text("v1 tools\n")
+            state = Path(folder) / "state"
+            import_references(state, sources)
+            copied = state / "references/pentest.txt"
+            self.assertEqual(copied.read_text(), "v1 handbook\n")
+            self.assertEqual(copied.stat().st_mode & 0o777, 0o600)
+            self.assertEqual((state / "references/dehset_pentest_araclari.txt").read_text(), "v1 tools\n")
+            (sources / "pentest.txt").write_text("v2 handbook\n")
+            import_references(state, sources)
+            self.assertEqual(copied.read_text(), "v1 handbook\n")  # never overwritten
+            missing = Path(folder) / "empty-desktop"
+            missing.mkdir()
+            fresh = Path(folder) / "fresh-state"
+            import_references(fresh, missing)  # missing sources are skipped silently
+            self.assertFalse((fresh / "references").exists())
+
+
+class PentestTests(unittest.TestCase):
+    """Full pentest mode: phases, engagement findings, screenshots, DOCX report."""
+
+    def test_pentest_policy_and_phases_exist(self):
+        policy = (Path(__file__).resolve().parent.parent / "cyber/policy-pentest.txt").read_text()
+        self.assertIn("CYBER_FINDINGS", policy)
+        self.assertIn("root", policy.lower())
+        self.assertEqual([p[0] for p in PENTEST_PHASES],
+                         ["recon", "services", "web", "vulns", "exploit", "privesc", "post"])
+        for _, label, _ in PENTEST_PHASES:
+            self.assertTrue(label and label.isupper())
+
+    def test_pentest_prompt_uses_dedicated_policy(self):
+        with tempfile.TemporaryDirectory() as folder:
+            console = Console(Path(folder), args())
+            console.target = "10.10.10.10"
+            prompt = console.prompt("phase task", "PENTEST 1/7: RECON")
+            self.assertIn("Full Pentest mode", prompt)
+            self.assertIn("CYBER_FINDINGS", prompt)
+            normal = console.prompt("normal task")
+            self.assertNotIn("Full Pentest mode", normal)
+
+    def test_menu_lists_full_pentest(self):
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()) as out:
+            Console(Path(folder), args()).menu()
+            self.assertIn("[10] Full pentest", out.getvalue())
+
+    def test_run_pentest_routes_phases_and_builds_report(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            console = Console(state, args())
+            console.target = "10.10.10.10"
+            phase_report = {"error": None, "elapsed": 12.0, "phase": "recon",
+                            "summary": {"status": "ok", "findings": ["TCP: 22, 80 open."],
+                                        "flags": ["THM{root}"], "next": []},
+                            "tools": [{"name": "bash", "output": "nmap done", "error": False}],
+                            "engagement_findings": [
+                                {"title": "Anonymous FTP", "severity": "high", "category": "Network",
+                                 "evidence": "ftp login succeeded", "impact": "file placement",
+                                 "remediation": "disable anonymous"}]}
+            # User starts, approves every phase, report builds.
+            answers = iter(["y"] + ["y"] * 6)
+            with patch.object(console, "ask", side_effect=lambda _: next(answers)), \
+                    patch.object(console, "execute", return_value=phase_report) as run, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(console.run_pentest())
+            self.assertEqual(run.call_count, len(PENTEST_PHASES))
+            first_task, first_label = run.call_args_list[0].args[:2]
+            self.assertIn("recon", first_label.lower())
+            engagement_files = sorted((state / "results").glob("pentest-*.json"))
+            self.assertEqual(len(engagement_files), 1)
+            engagement = read_json(engagement_files[0])
+            self.assertEqual(len(engagement["phases"]), len(PENTEST_PHASES))
+            self.assertEqual(engagement["findings"][0]["title"], "Anonymous FTP")
+            self.assertIn("THM{root}", engagement["flags"])
+            reports = sorted((state / "reports").glob("pentest-*.docx"))
+            self.assertEqual(len(reports), 1)
+            from docx import Document
+            doc = Document(reports[0])
+            headings = [p.text for p in doc.paragraphs if p.style.name.startswith(("Title", "Heading"))]
+            self.assertIn("1. Executive Summary", headings)
+            self.assertIn("4. Tool Activity Log", headings)
+            self.assertTrue(doc.inline_shapes)  # phase screenshot embedded
+
+    def test_run_pentest_requires_target(self):
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):
+            console = Console(Path(folder), args())
+            self.assertFalse(console.run_pentest())
+
+    def test_run_pentest_stop_after_one_phase(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            console = Console(state, args())
+            console.target = "10.10.10.10"
+            phase_report = {"error": None, "elapsed": 5.0, "summary": {"status": "ok",
+                            "findings": [], "flags": [], "next": []}, "tools": [],
+                            "engagement_findings": []}
+            with patch.object(console, "ask", side_effect=["y", "n"]), \
+                    patch.object(console, "execute", return_value=phase_report), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(console.run_pentest())
+            engagement = read_json(sorted((state / "results").glob("pentest-*.json"))[0])
+            self.assertEqual(len(engagement["phases"]), 1)
+
+    def test_run_pentest_blank_answer_advances_to_next_phase(self):
+        # The default phase transition is "continue": a blank Enter means yes.
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            console = Console(state, args())
+            console.target = "10.10.10.10"
+            phase_report = {"error": None, "elapsed": 5.0, "summary": {"status": "ok",
+                            "findings": [], "flags": [], "next": []}, "tools": [],
+                            "engagement_findings": []}
+            with patch.object(console, "ask", side_effect=["y", "", "n"]), \
+                    patch.object(console, "execute", return_value=phase_report) as run, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(console.run_pentest())
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual([call.kwargs["phase"] for call in run.call_args_list],
+                             ["recon", "services"])
+
+    def test_run_pentest_skip_leaves_no_phase_entry_and_continues(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            console = Console(state, args())
+            console.target = "10.10.10.10"
+            phase_report = {"error": None, "elapsed": 5.0, "summary": {"status": "ok",
+                            "findings": [], "flags": [], "next": []}, "tools": [],
+                            "engagement_findings": []}
+            with patch.object(console, "ask", side_effect=["y", "s", "n"]), \
+                    patch.object(console, "execute", return_value=phase_report) as run, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(console.run_pentest())
+            # services skipped: no execute call for it, recon and web still ran.
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual([call.kwargs["phase"] for call in run.call_args_list],
+                             ["recon", "web"])
+            engagement = read_json(sorted((state / "results").glob("pentest-*.json"))[0])
+            self.assertEqual([entry["phase"] for entry in engagement["phases"]],
+                             ["recon", "web"])
+
+    def test_run_pentest_blocked_phase_reports_and_continues(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            console = Console(state, args())
+            console.target = "10.10.10.10"
+            blocked = {"error": None, "elapsed": 5.0, "summary": {"status": "blocked",
+                       "findings": ["No credentials found."], "flags": [], "next": []},
+                       "tools": [], "engagement_findings": []}
+            ok = {"error": None, "elapsed": 5.0, "summary": {"status": "ok",
+                  "findings": [], "flags": [], "next": []}, "tools": [],
+                  "engagement_findings": []}
+            # recon blocked, user continues, services runs, last phase question -> stop.
+            with patch.object(console, "ask", side_effect=["y", "y", "n"]), \
+                    patch.object(console, "execute", side_effect=[blocked, ok]) as run, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(console.run_pentest())
+            self.assertEqual(run.call_count, 2)
+            engagement = read_json(sorted((state / "results").glob("pentest-*.json"))[0])
+            self.assertEqual(engagement["phases"][0]["status"], "blocked")
+
+    def test_run_pentest_interrupted_phase_still_records_partial_data(self):
+        # Ctrl+C during a phase must keep partial tools and still build a report.
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            console = Console(state, args())
+            console.target = "10.10.10.10"
+            partial = {"error": "Operation stopped.", "elapsed": 7.0, "phase": "recon",
+                       "summary": {"status": "partial", "findings": ["Phase interrupted; recorded outputs retained."],
+                                   "flags": [], "next": []},
+                       "tools": [{"id": "t1", "name": "bash", "output": "nmap started\n22/tcp open", "error": False}],
+                       "engagement_findings": []}
+            with patch.object(console, "ask", side_effect=["y", "n"]), \
+                    patch.object(console, "execute", return_value=partial) as run, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(console.run_pentest())
+            engagement = read_json(sorted((state / "results").glob("pentest-*.json"))[0])
+            self.assertEqual(len(engagement["phases"]), 1)
+            self.assertEqual(engagement["phases"][0]["status"], "partial")
+            self.assertEqual(len(engagement["tools"]), 1)
+            self.assertIn("22/tcp open", engagement["tools"][0]["output"])
+            reports = sorted((state / "reports").glob("pentest-*.docx"))
+            self.assertEqual(len(reports), 1)  # partial report still produced
+
+    def test_run_pentest_engine_failure_records_stopped_phase(self):
+        # execute() returns None when the phase never started; the phase entry
+        # is recorded as stopped and the engagement continues if the user agrees.
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            console = Console(state, args())
+            console.target = "10.10.10.10"
+            ok = {"error": None, "elapsed": 5.0, "summary": {"status": "ok",
+                  "findings": [], "flags": [], "next": []}, "tools": [],
+                  "engagement_findings": []}
+            # start -> recon fails to start (None) -> continue? y -> services ok -> stop.
+            with patch.object(console, "ask", side_effect=["y", "y", "n"]), \
+                    patch.object(console, "execute", side_effect=[None, ok]) as run, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(console.run_pentest())
+            self.assertEqual(run.call_count, 2)
+            engagement = read_json(sorted((state / "results").glob("pentest-*.json"))[0])
+            self.assertEqual([entry["status"] for entry in engagement["phases"]],
+                             ["stopped", "ok"])
+
+
+class ReportTests(unittest.TestCase):
+    """Engagement findings parsing, screenshots and the corporate DOCX report."""
+
+    def test_parse_engagement_findings(self):
+        sample = ('[CYBER_RESULT]{"status":"ok"}[/CYBER_RESULT]\n'
+                  '[CYBER_FINDINGS]{"findings":[{"title":"SQLi", "severity":"critical", '
+                  '"category":"Web", "evidence":"sqlmap", "impact":"bypass", '
+                  '"remediation":"prepared statements"}]}[/CYBER_FINDINGS]')
+        findings = parse_engagement_findings(sample)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["severity"], "critical")
+        self.assertEqual(parse_engagement_findings("no block here"), [])
+        self.assertEqual(parse_engagement_findings('[CYBER_FINDINGS]{"findings":[{"severity":"weird"}]}[/CYBER_FINDINGS]')[0]["severity"], "info")
+
+    def test_render_terminal_png(self):
+        with tempfile.TemporaryDirectory() as folder:
+            shot = render_terminal_png("PORT STATE\n80/tcp open http", Path(folder) / "shot.png",
+                                       title="Phase 1 - RECON")
+            self.assertTrue(shot.is_file())
+            with Image.open(shot) as image:
+                self.assertGreater(image.width, 100)
+            self.assertIsNone(render_terminal_png("", Path(folder) / "empty.png"))
+
+    def test_build_report_contains_sections_and_tables(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            shot = render_terminal_png("evidence line", root / "e.png", title="Evidence")
+            engagement = {"target": "10.10.10.10", "started": "2026-11-13T00:00:00+00:00",
+                          "finished": "2026-11-13T01:00:00+00:00", "final_access": "root",
+                          "phases": [{"phase": "recon", "label": "RECON", "elapsed": 30.0, "status": "ok"}],
+                          "findings": [{"title": "Anonymous FTP", "severity": "high", "category": "Network",
+                                        "evidence": "ftp", "impact": "placement", "remediation": "disable"}],
+                          "tools": [{"name": "bash", "phase": "recon", "output": "x", "error": False}],
+                          "screenshots": [{"title": "Evidence", "path": str(shot)}],
+                          "flags": ["THM{flag}"]}
+            docx = build_report(engagement, root / "report.docx")
+            self.assertTrue(docx.is_file())
+            from docx import Document
+            doc = Document(docx)
+            text = "\n".join(p.text for p in doc.paragraphs)
+            for section in ("1. Executive Summary", "2. Scope and Methodology",
+                            "3. Findings and Recommendations", "4. Tool Activity Log",
+                            "5. Evidence", "6. Conclusion"):
+                self.assertIn(section, text)
+            self.assertIn("Anonymous FTP", text)
+            self.assertTrue(doc.inline_shapes)
+            self.assertGreaterEqual(len(doc.tables), 4)  # cover, methodology, findings overview, detail, tools
 
 
 if __name__ == "__main__":

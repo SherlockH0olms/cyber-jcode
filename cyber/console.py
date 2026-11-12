@@ -20,7 +20,7 @@ import tomllib
 from typing import Callable
 import unicodedata
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 ROOT = Path(__file__).resolve().parent.parent
 ANSI = re.compile(
     r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|"
@@ -41,6 +41,45 @@ TASKS = {
           "Briefly report any missing information or access."),
 }
 GREETINGS = {"hi", "hello", "hey", "ping"}
+
+# Full pentest engagement phases, executed in order until blocked or stopped.
+PENTEST_PHASES = (
+    ("recon", "RECON", "Conduct full reconnaissance of the target: ping/host discovery, "
+     "a fast all-TCP-port scan (masscan or nmap -p-), then version and script "
+     "enumeration on every discovered port. Record open ports, service names and "
+     "versions, and the operating system guess in the workspace."),
+    ("services", "SERVICE ENUMERATION", "Enumerate each discovered service in depth and look "
+     "for credentials: anonymous FTP/SMB shares, SNMP/LDAP dumps, DNS zone data, "
+     "default or leaked credentials, and password spraying only with valid "
+     "discovered usernames. Preserve all discovered credentials and notes in the "
+     "workspace for later phases."),
+    ("web", "WEB ANALYSIS", "Analyze every web service: fingerprint with whatweb, "
+     "capture and review the main pages, enumerate directories and files with "
+     "feroxbuster/ffuf/gobuster, review robots.txt, identify frameworks/CMS and "
+     "their versions, examine forms, uploads and APIs. Note every interesting "
+     "endpoint, file, parameter and technology."),
+    ("vulns", "VULNERABILITY VERIFICATION", "Using prior discoveries, verify real "
+     "vulnerabilities: nuclei and nikto scans, CMS-specific checks (wpscan), "
+     "searchsploit against exact service versions, and targeted manual probes for "
+     "weak spots found in web analysis (SQLi, command injection, LFI, misconfig, "
+     "default creds). Report only what a real tool or probe confirmed. A version "
+     "number alone is not a finding."),
+    ("exploit", "EXPLOITATION / INITIAL ACCESS", "Exploit the verified vulnerabilities to "
+     "gain an initial foothold on the target. Prefer working public exploits for "
+     "the exact verified versions; verify success with a real command result "
+     "(id/whoami). Record the access level obtained and any new discoveries. If "
+     "multiple paths exist, use the safest reliable one."),
+    ("privesc", "PRIVILEGE ESCALATION", "From the current foothold, escalate to the "
+     "highest privilege (root on Linux, SYSTEM/Administrator on Windows): local "
+     "enumeration (sudo -l, SUID, cron, services, tokens, registry, scheduled "
+     "tasks), searchsploit for local exploits matching the kernel/OS version, "
+     "and stored credentials. Verify the final privilege with whoami/id. Capture "
+     "the root flag if accessible."),
+    ("post", "POST-EXPLOITATION", "Perform final post-exploitation: collect remaining "
+     "flags and evidence, capture interesting files and configuration, summarize "
+     "the full attack chain from first access to highest privilege, and write a "
+     "complete summary of the engagement into the workspace notes."),
+)
 
 
 def is_greeting(task: str) -> bool:
@@ -233,6 +272,7 @@ class RunResult:
     summary: dict = field(default_factory=dict)
     error: str | None = None
     elapsed: float = 0.0
+    raw_text: str = ""
 
 
 @dataclass
@@ -280,6 +320,7 @@ class Backend:
     def __init__(self, state: Path, binary: Path | None = None):
         self.state = state
         self.binary = binary or ROOT / "target/selfdev/jcode"
+        self.interrupted_result = None
 
     def environment(self) -> dict[str, str]:
         # A parent Jcode session may export its socket and self-dev paths.
@@ -310,8 +351,11 @@ class Backend:
                   provider: str, model: str, profile: str = "",
                   verified_flags: list[str] | None = None,
                   progress: Callable[[RunProgress], None] | None = None,
-                  greeting: bool = False) -> RunResult:
+                  greeting: bool = False,
+                  on_tool: Callable[[dict], None] | None = None,
+                  capture_tools: bool = False) -> RunResult:
         result = RunResult(session_id=session_id)
+        self.interrupted_result = None
         if not self.binary.is_file():
             result.error = "Engine missing. Complete setup with cyber/install.py."
             return result
@@ -350,6 +394,8 @@ class Backend:
         )
         stderr_tail = ""
         done = False
+        input_id = None
+        tool_inputs = {}
 
         async def drain_errors():
             nonlocal stderr_tail
@@ -367,6 +413,12 @@ class Backend:
                 if not isinstance(event, dict):
                     continue
                 kind = event.get("type")
+                if capture_tools and kind == "tool_start":
+                    input_id = str(event.get("id") or event.get("name", "tool")) if visible_tool(str(event.get("name", ""))) else None
+                    if input_id:
+                        tool_inputs[input_id] = ""
+                elif capture_tools and kind == "tool_input" and input_id:
+                    tool_inputs[input_id] = (tool_inputs[input_id] + str(event.get("delta", "")))[:32768]
                 if kind == "start":
                     activity.phase = "Waiting for model"
                     update()
@@ -398,12 +450,26 @@ class Backend:
                 if kind == "tool_done":
                     name = str(event.get("name", "tool"))
                     if visible_tool(name):
-                        result.tools.append({"name": clean(name),
-                                             "output": clean(event.get("output", ""))[:262144],
-                                             "error": bool(event.get("error"))})
-                        result.tools = result.tools[-200:]
+                        output = clean(event.get("output", ""))
+                        tool = {"id": str(event.get("id") or f"tool-{len(result.tools) + 1}"),
+                                "name": clean(name), "output": output[:262144],
+                                "error": bool(event.get("error")), "elapsed": round(time.monotonic() - start, 1),
+                                "truncated": len(output) > 262144}
+                        if capture_tools and name in ("bash", "shell", "terminal"):
+                            try:
+                                parameters = json.loads(tool_inputs.get(str(event.get("id") or name), "{}"))
+                                if isinstance(parameters, dict) and isinstance(parameters.get("command"), str):
+                                    tool["command"] = clean(parameters["command"])[:16000]
+                            except ValueError:
+                                pass
+                        result.tools.append(tool)
+                        if not capture_tools:
+                            result.tools = result.tools[-200:]
+                        if on_tool:
+                            on_tool(tool)
                 elif kind == "done":
                     result.summary = parse_result(str(event.get("text", "")))
+                    result.raw_text = clean(str(event.get("text", "")))[:262144]
                     done = True
                     activity.active.clear()
                     activity.background.clear()
@@ -419,6 +485,12 @@ class Backend:
                 result.error = error_message(stderr_tail)
             elif not done and not result.error:
                 result.error = "Engine exited without a result. Try again."
+        except asyncio.CancelledError:
+            result.error = "Operation stopped."
+            result.summary = {"status": "partial", "findings": ["Phase interrupted; recorded outputs retained."], "flags": [], "next": []}
+            result.elapsed = time.monotonic() - start
+            self.interrupted_result = result
+            raise
         finally:
             ticker.cancel()
             await asyncio.gather(ticker, return_exceptions=True)
@@ -465,6 +537,7 @@ class Console:
         self.color = sys.stdout.isatty() and not args.no_color and "NO_COLOR" not in os.environ
         self.width = max(8, shutil.get_terminal_size((80, 24)).columns - 1)
         self.last_path = self.settings.get("last_result")
+        self.last_docx = self.settings.get("last_docx")
 
     def line(self, text: str = "", color: str = ""):
         text = fit(text, self.width)
@@ -489,6 +562,7 @@ class Console:
             "target": self.target, "provider": self.provider, "model": self.model,
             "profile": self.profile, "session_id": self.session_id, "last_result": self.last_path,
             "verified_flags": self.verified_flags,
+            "last_docx": self.last_docx,
         })
 
     def model_label(self) -> str:
@@ -530,7 +604,8 @@ class Console:
         for row in (
             "  [1] Set target", "  [2] Port / service discovery", "  [3] Web discovery",
             "  [4] Review vulnerabilities", "  [5] Find flags", "  [6] Analyze file",
-            "  [7] Show last result", "  [8] Settings", "  [9] New session", "  [0] Exit",
+            "  [7] Show last result", "  [8] Settings", "  [9] New session",
+            "  [10] Full pentest (recon to root) + DOCX report", "  [0] Exit",
         ):
             self.line(row)
         self.line("-" * min(62, self.width), "32")
@@ -553,31 +628,56 @@ class Console:
         self.persist()
         self.line(f"[+] Target: {self.target}", "32")
 
-    def prompt(self, task: str) -> str:
-        policy = (ROOT / "cyber/policy.txt").read_text(encoding="utf-8")
-        return (f"{policy}\n\nLAB CONTEXT\nTarget: {self.target or '(not set)'}\n"
-                f"Workspace: {self.workspace()}\n\nUSER TASK\n{task}\n\n"
+    def prompt(self, task: str, task_label: str = "") -> str:
+        filename = "policy-pentest.txt" if task_label.startswith("PENTEST") else "policy.txt"
+        policy = (ROOT / "cyber" / filename).read_text(encoding="utf-8")
+        context = f"Target: {self.target or '(not set)'}\nWorkspace: {self.workspace()}"
+        if self.verified_flags:
+            context += "\nVerified flags so far: " + ", ".join(self.verified_flags)
+        if task_label.startswith("PENTEST"):
+            context += "\nREFERENCE HANDBOOKS (read relevant sections as needed):"
+            for filename in ("pentest.txt", "dehset_pentest_araclari.txt"):
+                path = self.state / "references" / filename
+                if path.is_file():
+                    context += f"\n{path}"
+        return (f"{policy}\n\nLAB CONTEXT\n{context}\n\nUSER TASK\n{task}\n\n"
                 "Finish with the delimited CYBER_RESULT JSON. No conversational output.")
 
-    def execute(self, task: str, label: str = "TASK") -> bool:
+    def execute(self, task: str, label: str = "TASK", phase: str = "",
+                extra_context: str = "") -> dict | None:
+        """Run one task. Returns the report dict, or None if it never started."""
         if is_greeting(task):
-            return self.greet(task)
+            self.greet(task)
+            return None
         self.line(f"[*] {label} running...  Ctrl+C: stop", "36")
         display = ProgressDisplay(self.width)
+        prompt = self.prompt(task, label)
+        if extra_context:
+            # Insert engagement continuity between the policy and the user task.
+            prompt = prompt.replace("\n\nUSER TASK\n",
+                                    f"\n\nENGAGEMENT CONTEXT (from earlier phases)\n{extra_context}\n\nUSER TASK\n")
+        def on_tool(tool):
+            display.finish()
+            self.show_tool(tool)
         try:
             result = asyncio.run(self.backend.run(
-                self.prompt(task), self.workspace(), self.session_id,
+                prompt, self.workspace(), self.session_id,
                 self.provider, self.model, self.profile,
                 self.verified_flags, progress=display,
+                on_tool=on_tool if phase else None, capture_tools=bool(phase),
             ))
         except KeyboardInterrupt:
             display.finish()
             self.line("[!] Operation stopped.", "33")
-            return False
+            if not phase:
+                return None
+            result = self.backend.interrupted_result or RunResult(error="Operation stopped.")
         except (OSError, ValueError):
             display.finish()
             self.line("[!] Could not start. Check the connection / workspace.", "31")
-            return False
+            if not phase:
+                return None
+            result = RunResult(error="Could not start the phase.")
         display.finish()
         self.session_id = result.session_id
         self.verified_flags = list(dict.fromkeys(
@@ -587,12 +687,22 @@ class Console:
         report = {"target": self.target, "task": task, "label": label, "session_id": result.session_id,
                   "tools": result.tools, "summary": result.summary, "error": result.error,
                   "elapsed": round(result.elapsed, 1)}
+        if phase:
+            report["phase"] = phase
+            try:
+                from cyber.report import parse_engagement_details, link_findings, verified_access
+                details = parse_engagement_details(result.raw_text)
+                report["engagement_findings"] = link_findings(details["findings"], result.tools)
+                report["access"] = verified_access(details["access"], result.tools, self.target)
+                report["limitations"] = details["limitations"]
+            except ImportError:
+                report["engagement_findings"] = []
         path = self.state / "results" / f"{stamp}.json"
         write_json(path, report)
         self.last_path = str(path)
         self.persist()
-        self.show_result(report)
-        return not result.error and result.summary.get("status") == "ok"
+        self.show_result(report, hide_tools=bool(phase))
+        return report
 
     def greet(self, task: str) -> bool:
         # A real, tool-free model turn must not replace the lab session or report.
@@ -627,7 +737,18 @@ class Console:
         self.line(f"[+] {fit(' '.join(findings[0].split()[:3]), 60)}", "32")
         return True
 
-    def show_result(self, report: dict):
+    def show_tool(self, tool: dict):
+        visible = display_tool(tool)
+        if visible is None:
+            return
+        self.line(f"[{'!' if visible['error'] else '+'}] {tool.get('id', '')} {visible['name']}", "33" if visible["error"] else "32")
+        rows = visible["output"].splitlines() if self.args.full_output else preview_rows(visible)
+        for row in (rows if self.args.full_output else rows[:16]):
+            self.line("    " + row)
+        if not self.args.full_output and len(rows) > 16:
+            self.line(f"    … {len(rows) - 16} more lines saved.")
+
+    def show_result(self, report: dict, all_outputs: bool = False, hide_tools: bool = False):
         self.line()
         summary = report.get("summary", {})
         status = "FAILED" if report.get("error") else str(summary.get("status", "partial")).upper()
@@ -645,15 +766,22 @@ class Console:
             self.prose(finding, "[+] " if summary.get("status") == "ok" else "[!] ")
         for next_step in summary.get("next", []):
             self.prose(next_step, "[>] ")
-        tools = [visible for tool in report.get("tools", []) if (visible := display_tool(tool)) is not None]
+        findings = report.get("engagement_findings") or []
+        if findings:
+            self.line("-" * min(62, self.width), "32")
+            self.line(f"  ENGAGEMENT FINDINGS | {len(findings)}", "36")
+            for finding in findings:
+                self.prose(f"{finding['severity'].upper()}: {finding['title']} "
+                           f"({finding['category']})", "[V] ", "35")
+        tools = [] if hide_tools else [visible for tool in report.get("tools", []) if (visible := display_tool(tool)) is not None]
         if tools:
             self.line("-" * min(62, self.width), "32")
             self.line(f"  TOOL OUTPUTS | {len(tools)} results", "36")
-        shown = tools if self.args.full_output else tools[-8:]
+        shown = tools if (self.args.full_output or all_outputs) else tools[-8:]
         for tool in shown:
             self.line(f"[{'!' if tool['error'] else '+'}] {tool['name']}", "33" if tool["error"] else "32")
-            rows = tool["output"].splitlines() if self.args.full_output else preview_rows(tool)
-            visible = rows if self.args.full_output else rows[:16]
+            rows = tool["output"].splitlines() if (self.args.full_output or all_outputs) else preview_rows(tool)
+            visible = rows if (self.args.full_output or all_outputs) else rows[:16]
             for row in visible:
                 self.line(f"    {row}")
             if len(visible) < len(rows):
@@ -681,14 +809,131 @@ class Console:
         self.line(f"[+] Saved: {self.last_path}", "32")
 
     def check_connection(self) -> bool:
-        success = self.execute("Connection check: use bash to run only printf CYBER_OK. "
+        report = self.execute("Connection check: use bash to run only printf CYBER_OK. "
                                "Do not scan the network. Report Connection ready.", "CONNECTION")
-        report = read_json(Path(self.last_path)) if self.last_path else {}
-        confirmed = any(tool.get("name") == "bash" and "CYBER_OK" in tool.get("output", "")
-                        and not tool.get("error") for tool in report.get("tools", []))
+        success = bool(report) and not report.get("error") \
+            and report.get("summary", {}).get("status") == "ok"
+        confirmed = bool(report) and any(
+            tool.get("name") == "bash" and "CYBER_OK" in tool.get("output", "")
+            and not tool.get("error") for tool in report.get("tools", []))
         if success and not confirmed:
             self.line("[!] Tool connection could not be verified.", "33")
         return success and confirmed
+
+    def run_pentest(self):
+        """Run the full engagement: phased methodology, then a DOCX report."""
+        if not self.target:
+            self.line("[!] Set a target with [1] first.", "33")
+            return False
+        from cyber import report as report_module
+        self.line("=" * min(62, self.width), "36")
+        self.line("  FULL PENTEST ENGAGEMENT", "36")
+        self.line(f"  Target : {self.target}")
+        self.line("  Phases : recon -> services -> web -> vulns -> exploit ->")
+        self.line("           privesc -> post, then the DOCX report.")
+        self.line("  Each phase can be stopped with Ctrl+C.", "36")
+        self.line("=" * min(62, self.width), "36")
+        answer = self.ask("Start the engagement? (y/n) > ")
+        if answer.lower() not in ("y", "yes", "evet", "start", "baslat", "başlat"):
+            self.line("[*] Engagement cancelled.", "36")
+            return False
+        started = datetime.now(timezone.utc).isoformat()
+        evidence = self.state / "labs" / "evidence"
+        engagement = {"target": self.target, "started": started, "phases": [],
+                      "findings": [], "tools": [], "screenshots": [], "flags": []}
+        phase_reports: list[dict] = []
+        status_by_phase: dict[str, str] = {}
+        skip_next_phase = False
+        for index, (phase, label, description) in enumerate(PENTEST_PHASES, start=1):
+            if skip_next_phase:
+                # The user answered "s" to skip this phase entirely.
+                skip_next_phase = False
+                self.line(f"[*] Phase {index}/{len(PENTEST_PHASES)} skipped: {label}", "36")
+                continue
+            self.line()
+            self.line(f"[PHASE {index}/{len(PENTEST_PHASES)}] {label}", "36")
+            # Continuity: earlier phases' compact outputs are the engagement context.
+            context_parts = ["Prior verified flags: " + (", ".join(self.verified_flags) or "none")]
+            for prior in phase_reports:
+                prior_phase = prior.get("phase") or "prior"
+                context_parts.append(f"{prior_phase} phase status: {status_by_phase.get(prior_phase, 'partial')}; "
+                                     f"key results: " + "; ".join(prior.get("summary", {}).get("findings", [])))
+            extra = "\n".join(context_parts)
+            task = (f"Engagement phase: {label}. {description} "
+                    "This phase is part of a larger authorized pentest engagement; previous "
+                    "phases' results are summarized in the engagement context and files in "
+                    "the workspace. Perform this phase completely with real tools.")
+            report = self.execute(task, f"PENTEST {index}/{len(PENTEST_PHASES)}: {label}",
+                                  phase=phase, extra_context=extra)
+            if report is None:  # stopped or failed to start; user decides whether to continue
+                answer = self.ask("Phase interrupted. Continue with the next phase? (y/n) > ")
+                if answer.lower() not in ("y", "yes", "evet"):
+                    break
+                engagement["phases"].append({"phase": phase, "label": label,
+                                              "elapsed": 0, "status": "stopped"})
+                continue
+            phase_reports.append(report)
+            status_by_phase[phase] = str(report.get("summary", {}).get("status", "partial"))
+            engagement["phases"].append({
+                "phase": phase, "label": label, "elapsed": report.get("elapsed", 0),
+                "status": report.get("summary", {}).get("status", "partial")})
+            for finding in report.get("engagement_findings") or []:
+                engagement["findings"].append(finding)
+            for tool in report.get("tools", []):
+                tool_entry = dict(tool)
+                tool_entry["phase"] = phase
+                engagement["tools"].append(tool_entry)
+            engagement["flags"] = list(dict.fromkeys(
+                self.verified_flags + report.get("summary", {}).get("flags", [])))
+            # Terminal-style evidence PNG for this phase's tool transcript.
+            transcript = "\n".join(
+                f"[{'!' if t.get('error') else '+'}] {t.get('name')}:\n{t.get('output', '')}"
+                for t in report.get("tools", []))
+            shot = report_module.render_terminal_png(
+                transcript, evidence / f"phase-{index:02d}-{phase}.png",
+                title=f"Phase {index}/{len(PENTEST_PHASES)} - {label} - {self.target}")
+            if shot:
+                engagement["screenshots"].append(
+                    {"title": f"Phase {index}: {label}", "path": str(shot)})
+            status = report.get("summary", {}).get("status", "partial")
+            if status == "blocked":
+                answer = self.ask("Phase reported BLOCKED. Continue to the next phase? (y/n) > ")
+                if answer.lower() not in ("y", "yes", "evet"):
+                    break
+            elif index < len(PENTEST_PHASES):
+                answer = self.ask(f"Phase complete. Run phase {index + 1}/{len(PENTEST_PHASES)}: "
+                                  f"{PENTEST_PHASES[index][1]}? (y/n/s = skip it) > ")
+                if answer.lower() == "s":
+                    skip_next_phase = True
+                    continue
+                if answer.lower() not in ("y", "yes", "evet", ""):
+                    break
+        # Determine the recorded access level from the final phases.
+        final_access = "Initial foothold or higher (see phase results)" if any(
+            status_by_phase.get(phase) == "ok" for phase in ("exploit", "privesc")
+        ) else "No verified access level recorded"
+        engagement["finished"] = datetime.now(timezone.utc).isoformat()
+        engagement["final_access"] = final_access
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        engagement_path = self.state / "results" / f"pentest-{stamp}.json"
+        write_json(engagement_path, engagement)
+        try:
+            docx_path = report_module.build_report(engagement, self.state / "reports" / f"pentest-{stamp}.docx")
+            self.line(f"[+] Engagement data: {engagement_path}", "32")
+            self.line(f"[+] DOCX report    : {docx_path}", "32")
+            try:  # also copy the report where Windows can open it easily
+                windows_dir = Path("/mnt/c/Users/ASUS/Desktop")
+                if windows_dir.is_dir():
+                    import shutil as _shutil
+                    copied = windows_dir / f"cyber-jcode-pentest-{stamp}.docx"
+                    _shutil.copyfile(docx_path, copied)
+                    self.line(f"[+] Windows copy  : {copied}", "32")
+            except OSError:
+                pass
+        except ImportError:
+            self.line("[!] python-docx / Pillow missing: pip install python-docx pillow", "31")
+            self.line(f"[+] Engagement data: {engagement_path}", "32")
+        return True
 
     def settings_menu(self):
         while True:
@@ -769,7 +1014,10 @@ class Console:
         if self.args.check:
             return 0 if self.check_connection() else 1
         if self.args.run:
-            return 0 if self.execute(self.args.run) else 1
+            if is_greeting(self.args.run):
+                return 0 if self.greet(self.args.run) else 1
+            result = self.execute(self.args.run)
+            return 0 if result and not result.get("error") and result.get("summary", {}).get("status") == "ok" else 1
         while True:
             try:
                 choice = self.ask("cyber > ")
@@ -809,6 +1057,8 @@ class Console:
                     self.last_path = None
                     self.persist()
                     self.line("[+] New session ready.", "32")
+                elif choice in ("10", "pentest", "full", "tam"):
+                    self.run_pentest()
                 elif choice in ("save", "kaydet"):
                     self.save_result()
                 elif choice in ("clear", "temizle"):
@@ -866,6 +1116,8 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--menu", action="store_true", help="Show the menu and exit")
     mode.add_argument("--check", action="store_true", help="Check the model and actual tool execution")
     mode.add_argument("--run", help="Run one task and exit")
+    mode.add_argument("--pentest", action="store_true",
+                      help="Run the full phased pentest engagement and produce a DOCX report")
     forwarded = bool(argv and argv[0] in ("provider", "model", "auth", "login"))
     args = None if forwarded else parser.parse_args(argv)
     state = Path(os.environ.get("CYBER_JCODE_HOME", str(Path.home() / ".cyber-jcode"))).expanduser().resolve()
@@ -876,7 +1128,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if forwarded:
             return forward_command(state, argv)
-        return Console(state, args).loop()
+        console = Console(state, args)
+        if args.pentest:
+            return 0 if console.run_pentest() else 1
+        return console.loop()
     except KeyboardInterrupt:
         print("\n[!] Operation stopped.", file=sys.stderr)
         return 130

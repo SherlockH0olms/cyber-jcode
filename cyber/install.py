@@ -44,6 +44,18 @@ def copy_private(source: Path, destination: Path):
         destination.chmod(0o600)
 
 
+REFERENCE_FILES = ("pentest.txt", "dehset_pentest_araclari.txt")
+
+
+def import_references(state: Path, sources: Path | None = None):
+    """Copy the user's pentest handbooks into the private state, never overwrite."""
+    folder = sources or Path("/mnt/c/Users/ASUS/Desktop")
+    for name in REFERENCE_FILES:
+        source = folder / name
+        if source.is_file():
+            copy_private(source, state / "references" / name)
+
+
 def import_settings(home: Path, state: Path):
     engine = state / "engine"
     copy_private(home / ".jcode/config.toml", engine / "config.toml")
@@ -82,6 +94,7 @@ def install(home: Path, state: Path, build: bool = True):
     if not binary.is_file():
         raise ValueError("Build the source engine first: cargo build --profile selfdev --bin jcode")
     import_settings(home, state)
+    import_references(state)
     for path in (state / "engine", state / "engine/config/jcode", state / "run", state / "results"):
         private_dir(path)
     launcher = ROOT / "cyber-jcode"

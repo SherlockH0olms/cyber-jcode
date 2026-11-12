@@ -1,0 +1,23 @@
+{
+  "version": "0.3.0",
+  "date": "2026-11-13",
+  "title": "Cyber-Jcode full pentest engagement mode",
+  "highlights": [
+    "New [10] Full pentest mode: seven ordered methodology phases (recon, services, web, vulns, exploit, privesc, post) running toward the highest privilege",
+    "Live per-tool streaming during phases: every tool invocation and result is shown as it completes, bash commands shown with their command line",
+    "Plain corporate English DOCX engagement report with evidence screenshots, per-phase methodology table, findings with evidence-linked validation, and a full recorded-tool appendix"
+  ],
+  "improvements": [
+    "Phase transitions: Enter/y run the next phase, n stops and reports, s skips that phase",
+    "Ctrl+C mid-phase keeps partial tool outputs, records the phase as partial, and still produces the report",
+    "Phase results travel forward as engagement context; verified flags persist across phases",
+    "Pentest policy contract adds structured [CYBER_FINDINGS] with asset, reproduction and evidence excerpts, plus verified access-level reporting",
+    "Installer copies the user's pentest handbooks into ~/.cyber-jcode/references (once, never overwritten); phases reference them as methodology guidance",
+    "Report renderer: simple black/white corporate styling, page-safe evidence images, command + output per tool in Appendix A"
+  ],
+  "fixes": [
+    "Skip ('s') now actually skips the next phase instead of running it",
+    "Robust phase context assembly when a phase report lacks a phase key",
+    "Report building tolerates missing engagement fields and never crashes a finished engagement"
+  ]
+}
