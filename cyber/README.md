@@ -19,9 +19,10 @@ for a short **real model response** without tools or changes to your lab session
 During a task, one status row shows elapsed time, the current phase or tool name,
 and completed/active tool counts. Redirected output gets a status line every
 ten seconds. This is activity information, not a completion estimate. The menu
-shows the target and a motto instead of the engine or model identity: no model
-fingerprints are displayed anywhere in the console. Reasoning,
-chat streams and tool inputs stay hidden. Up to four short English findings
+shows the target and a motto instead of the engine or model identity.
+Explicit provider/model configuration commands show their own metadata.
+Reasoning and chat streams stay hidden; normal tasks also hide tool inputs.
+Up to four short English findings
 appear first, followed by actual tool outputs, including written notes and
 port/service tables. Background task envelopes are removed; their actual
 output is retained. HTML source gets a compact preview. Use `--full-output`
@@ -65,23 +66,46 @@ transcript, per-tool command/output pairs and evidence identifiers are kept in
 the engagement JSON, and the DOCX appendix reproduces each recorded tool result.
 
 The engagement ends with `~/.cyber-jcode/results/pentest-<stamp>.json` (all
-data), `~/.cyber-jcode/reports/pentest-<stamp>.docx` and a copy on the Windows
-Desktop. The report contains: cover, executive summary, methodology table,
+data) and `~/.cyber-jcode/reports/pentest-<stamp>.docx`. On the original WSL
+setup, it also attempts a copy to `/mnt/c/Users/ASUS/Desktop` when that
+directory exists; other machines should use the report path printed by the
+console. The report contains: cover, executive summary, methodology table,
 findings overview and detail tables sorted by severity (with evidence-linked
 validation and reproduction steps), tool activity log, embedded terminal-style
 evidence images per phase, conclusion with observed flags, and an appendix with
-each recorded tool invocation and output. Requirements: `pip install python-docx
-pillow`.
+each recorded tool invocation and output. The embedded images are rendered
+from recorded tool output, not live browser or desktop screenshots.
+Report dependencies are `python-docx` and Pillow; the
+[installation guide](../README.md#install-on-kali--debian--ubuntu--wsl)
+installs their distribution packages.
 
 The installer also copies `pentest.txt` and `dehset_pentest_araclari.txt` from
-the Windows Desktop into `~/.cyber-jcode/references` (once; never overwritten).
-Full pentest phases reference these handbooks as optional methodology guidance.
+`/mnt/c/Users/ASUS/Desktop` into `~/.cyber-jcode/references` when available
+(once; never overwritten). On another machine, place the files directly in
+that private references directory. Full pentest phases reference these
+handbooks as optional methodology guidance; they are not required for setup.
 
 ## OpenAI-compatible connection
 
-The first installation copies existing Jcode model settings and credentials
-into Cyber-Jcode's private directories. A working copied connection needs no
+The first installation copies available existing Jcode model settings and
+credentials into Cyber-Jcode's private directories. Original Jcode does not
+need to be installed. A working copied connection needs no
 reconfiguration. Later changes to original Jcode settings are not synchronized.
+
+On a fresh computer, configure your connection from the Linux shell:
+
+```bash
+cyber-jcode login openai-compatible \
+  --api-base https://ornek.com/v1 \
+  --api-key SK-XXXX \
+  --model MODEL_ID
+cyber-jcode --check
+```
+
+Replace the example endpoint, key and model. Omitting `--api-key` opens a
+secure prompt. This login sets the initial provider/model default on a fresh
+installation. For an existing configuration, the named profile command below
+with `--set-default` explicitly selects the new connection.
 
 Cyber-Jcode forwards the existing Jcode configuration commands with its private
 environment. It uses Jcode's provider writer, authentication and option handling.
@@ -112,17 +136,18 @@ cyber-jcode auth status
 
 ## Installation and isolation
 
-```bash
-cd ~/cyber-jcode
-python3 cyber/install.py
-```
+Follow the [root README installation guide](../README.md#install-on-kali--debian--ubuntu--wsl)
+for cloning, OS/report dependencies, Rust, setup and PATH. It is the
+authoritative Cyber-Jcode setup procedure for Linux/WSL, requiring Python
+3.11+ and current stable Rust for the initial engine build.
 
-Requires Python 3.11+ and the Rust toolchain for the initial engine build.
 The engine is built from this repository as `target/selfdev/jcode`. The installer
-creates `~/.local/bin/cyber-jcode`. If that directory is absent from PATH,
-`sudo python3 cyber/install.py --link-system` additionally links
-`/usr/local/bin/cyber-jcode`; it refuses to overwrite a different existing command.
-Original Jcode settings, credentials and launcher are preserved.
+creates `~/.local/bin/cyber-jcode`; it refuses to overwrite a different existing
+command. That symlink requires the checkout to remain at its installed path.
+`--skip-build` requires an already built local engine. `--link-system` only
+creates the system symlink; it does not install or build Cyber-Jcode.
+Original Jcode settings, credentials and launcher are preserved. The original
+Jcode shell installers and `cargo install --path .` are not Cyber-Jcode setup.
 
 Cyber-Jcode data lives in `~/.cyber-jcode`: `engine` holds private model settings
 and backend sessions, `run` holds the isolated socket, `labs` holds workspaces,
@@ -135,7 +160,10 @@ Python/interface updates take effect when the console is reopened. An operation
 already running continues with the code loaded by that process.
 
 ```bash
-python3 -m unittest cyber.test_console -v
 python3 cyber/install.py --verify-original
 cyber-jcode --check
 ```
+
+`--verify-original` compares the original Jcode files, links, permissions and
+timestamps against the first setup snapshot. Later user changes to original
+Jcode can make this check fail without indicating a Cyber-Jcode conflict.

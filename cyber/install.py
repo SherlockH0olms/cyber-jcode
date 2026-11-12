@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from cyber.console import ROOT, private_dir, read_json, write_json
+from cyber.console import ROOT, private_dir, write_json
 
 
 def snapshot(home: Path) -> dict:
@@ -125,8 +125,8 @@ def main():
             link_launcher(Path("/usr/local/bin/cyber-jcode"), ROOT / "cyber-jcode")
             print("[+] /usr/local/bin/cyber-jcode ready.")
         elif args.verify_original:
-            baseline = read_json(state / "original-install-snapshot.json")
-            if not baseline or snapshot(home) != baseline:
+            baseline = json.loads((state / "original-install-snapshot.json").read_text())
+            if not isinstance(baseline, dict) or snapshot(home) != baseline:
                 print("[!] Existing installation verification failed.")
                 return 1
             print("[+] Existing jcode files and links unchanged.")

@@ -1,127 +1,170 @@
-<div align="center">
+# Cyber-Jcode
 
-<p>
-<a href="https://trendshift.io/repositories/25042?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25042" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25042" alt="1jehuang/jcode | Trendshift" width="250" height="55"></a>
-</p>
+An English, numbered terminal console for TryHackMe and CTF labs. Jcode's
+model and tool engine runs behind the console; the interface shows short
+findings, actual tool output and task progress. Full pentest mode records
+the assessment in a plain enterprise-English DOCX report.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/jcode-mark-inverse.svg">
-  <img src="assets/brand/jcode-mark.svg" alt="jcode halftone donut logo" width="160">
-</picture>
+## Install on Kali / Debian / Ubuntu / WSL
 
-# jcode
+Run these commands **inside Linux or your WSL distribution**, as your normal
+user. The console requires Python 3.11 or newer. Native Windows installation
+is not supported by this launcher.
 
-<p>
-  <strong>High-performance coding agents.</strong><br>
-  Run dozens of agents in parallel without melting your machine. More agents, less RAM, no lag.
-</p>
-
-[![Last Commit](https://img.shields.io/github/last-commit/1jehuang/jcode/master?style=flat-square&logo=github)](https://github.com/1jehuang/jcode/commits/master)
-[![GitHub Stars](https://img.shields.io/github/stars/1jehuang/jcode?style=flat-square&logo=github)](https://github.com/1jehuang/jcode/stargazers)
-[![GitHub Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2F1jehuang%2Fjcode%2Fmaster%2Fdocs%2Fbadges%2Fdownloads.json&style=flat-square&logo=github)](https://github.com/1jehuang/jcode/releases)
-
-[![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/nBe9vGyK9a)
-[![Y Combinator](https://img.shields.io/badge/Y%20Combinator-S26-F26625?style=flat-square&logo=ycombinator&logoColor=white)](https://www.ycombinator.com/companies/jcode)
-[![X (Twitter)](https://img.shields.io/badge/follow-%401jehuang-000000?style=flat-square&logo=x&logoColor=white)](https://x.com/1jehuang)
-
-</div>
-
-<div align="center">
-
-  <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-performance-demo-2026-10.mp4">
-    <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-performance-demo-2026-10-30fps.webp" alt="jcode performance demonstration" width="900">
-  </a>
-
-  <p><em>jcode performance demonstration (1x speed)</em></p>
-
-<a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-yc-launch.mp4">
-  <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-yc-launch.webp" alt="jcode YC launch video" width="800">
-</a>
-
-</div>
-
-<div align="center">
-
-## Installation
-
-</div>
+Install the build tools and report dependencies:
 
 ```bash
-# macOS & Linux
-curl -fsSL https://jcode.sh/install | bash
+sudo apt update
+sudo apt install -y git curl ca-certificates build-essential pkg-config \
+  libssl-dev perl cmake python3 python3-docx python3-pil fonts-dejavu-core
 ```
 
-<div align="center">
+Install the current stable Rust toolchain if Rust is not already installed:
 
-## Benches
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+  sh -s -- -y --profile minimal --default-toolchain stable
+. "$HOME/.cargo/env"
+```
 
-</div>
+An existing older Rust toolchain can be updated with `rustup update stable`.
+The source engine has been built with Rust 1.95.0. Python report dependencies
+are installed with `apt` above, so no system-wide `pip` installation is needed.
 
-### RAM per additional session (headless)
+Clone **your published Cyber-Jcode repository**. Replace `YOUR_GITHUB_USER`
+with its actual owner; this URL is a placeholder:
 
-| Tool | First session | Each additional session | Comparison (additional) |
-|---|---|---|---|
-| **jcode** | **71.3 MB** | **~3.3 MB** | baseline |
-| **OpenCode** | 637.1 MB | ~5.9 MB | **1.8× more RAM** |
-| **pi** | 84.0 MB | ~79.6 MB | **24.1× more RAM** |
-| **Claude Code** | 272.9 MB | ~169.3 MB | **51.3× more RAM** |
-| **Codex CLI** | 398.6 MB | ~194.1 MB | **58.8× more RAM** |
+```bash
+git clone https://github.com/YOUR_GITHUB_USER/cyber-jcode.git ~/cyber-jcode
+cd ~/cyber-jcode
+python3 cyber/install.py
+export PATH="$HOME/.local/bin:$PATH"
+cyber-jcode --version
+cyber-jcode --menu
+```
 
-[Reproduce](scripts/bench_headless_memory.py).
+Add the `export PATH=...` line to `~/.zshrc` (Kali's usual shell) or
+`~/.bashrc` to keep it for new terminals. The installer builds the local
+engine with `cargo build --locked --profile selfdev --bin jcode -j 2` and
+links `~/.local/bin/cyber-jcode` to this checkout. The first build can take
+several minutes; keep the checkout at its installed path.
 
-### Time to first input
+An existing Jcode installation is **not required**. If one exists, setup
+copies available connection settings into private Cyber-Jcode storage.
+Original files and the `jcode` launcher are preserved. A fresh computer
+needs its own model connection configured below; credentials and generated
+build files are not included in a Git clone.
 
-Time until typed text appears on screen, across 10 interactive launches.
+This fork's installer is `python3 cyber/install.py`. The upstream
+`https://jcode.sh/install`, `scripts/install.sh`, `scripts/install_release.sh`,
+`scripts/install.ps1` and `cargo install --path .` install original Jcode
+commands, so they are not the Cyber-Jcode setup procedure.
 
-| Tool | Time to first input | Comparison |
-|---|---|---|
-| **jcode** | **19.1 ms** | baseline |
-| **pi** | 596.4 ms | **31.2× slower** |
-| **Codex CLI** | 905.8 ms | **47.4× slower** |
-| **OpenCode** | 1047.9 ms | **54.9× slower** |
-| **Claude Code** | 3512.8 ms | **183.9× slower** |
+## Connect an OpenAI-compatible model
 
-Full numbers on [jcode.sh](https://jcode.sh).
+Run connection commands in your **Linux shell**, after leaving `cyber >`:
 
-<div align="center">
+```bash
+cyber-jcode login openai-compatible \
+  --api-base https://ornek.com/v1 \
+  --api-key SK-XXXX \
+  --model MODEL_ID
+```
 
-## Screenshots
+Replace the URL, key and model ID with your endpoint's values. Omitting
+`--api-key` prompts for it securely. On a fresh installation this login
+sets the initial provider/model default. `--no-validate` saves credentials
+without checking the endpoint; normal login validates the connection.
 
-[Browse the interactive gallery on jcode.sh](https://jcode.sh/#screenshots).
+Check the connection, then open the console:
 
-<table>
-  <tr>
-    <td align="center"><a href="https://jcode.sh/screenshots/inline-image-rendering.webp"><img src="https://jcode.sh/screenshots/thumbs/inline-image-rendering.webp" alt="Jcode rendering screenshots inline after reading image files" width="440" /></a><br>Inline images</td>
-    <td align="center"><a href="https://jcode.sh/screenshots/resume-menu.webp"><img src="https://jcode.sh/screenshots/thumbs/resume-menu.webp" alt="Jcode resume menu with a session list and preview" width="440" /></a><br>Resume menu</td>
-  </tr>
-  <tr>
-    <td align="center"><a href="https://jcode.sh/screenshots/latex-math-rendering.webp"><img src="https://jcode.sh/screenshots/thumbs/latex-math-rendering.webp" alt="Jcode rendering LaTeX mathematics inline" width="440" /></a><br>Inline LaTeX</td>
-    <td align="center"><a href="https://jcode.sh/screenshots/cache-cold-notification.webp"><img src="https://jcode.sh/screenshots/thumbs/cache-cold-notification.webp" alt="Jcode warning that the prompt cache went cold" width="440" /></a><br>Cache cold notification</td>
-  </tr>
-</table>
+```bash
+cyber-jcode --check
+cyber-jcode
+```
 
-</div>
+At `cyber >`, type `hi` for a short real model response without tools.
+`--check` also verifies a harmless local tool invocation. For lab work,
+choose a model that supports tool calling and ensure the required tools
+are installed in Linux; setup installs the console, engine and reporting
+dependencies, not every pentest utility or your lab VPN.
 
-## Swarm
+To add a named connection and make it the default even when an older
+connection was copied, use:
 
-Spawn two or more agents in the same repo, and they will automatically be managed by the server to allow native collaboration. When agent A edits a file that agent B has read (code shifting under its feet), the server notifies agent B. Agent B can ignore it if it is not relevant, or it can check the diff to make sure that it doesn't conflict. Each agent has messaging abilities, capable of DMing just one agent, broadcasting to all other agents hosted by the server, or just agents working in that repo. This allows you to spawn multiple sessions in the same repo, and have all conflicts automatically resolved.
+```bash
+python3 -c 'import getpass; print(getpass.getpass("API key: "))' | \
+  cyber-jcode provider add my-api \
+  --base-url https://ornek.com/v1 \
+  --model MODEL_ID \
+  --api-key-stdin \
+  --set-default
+```
 
-Agents are also able to spawn their own swarms autonomously. They have a swarm tool which allows them to spawn in their own teamates to accomplish tasks in parallel. Doing so turns the main agent into a coordinator and the spawned agents into workers. Groups of agents, their messaging channels, their completion statuses, etc are all automatically managed. This can be done headlessly or headed.
+`provider add` uses `--base-url`; `login` uses `--api-base`.
+Add `--overwrite` to replace an existing named profile. For a local
+endpoint without authentication, use `--no-api-key` instead of
+`--api-key-stdin`.
 
+```bash
+cyber-jcode provider current
+cyber-jcode provider list
+cyber-jcode model list --json
+cyber-jcode auth status
+cyber-jcode login openai-compatible --help
+cyber-jcode provider add --help
+```
 
-## OAuth and Providers
+The forwarded configuration command (`login`, `provider`, `model` or `auth`)
+must come immediately after `cyber-jcode`. Its help may say `jcode` because
+it comes from the embedded engine; it still uses Cyber-Jcode's private state.
 
-Supports a [wide range of providers](https://jcode.sh/docs#providers), including Claude OAuth and OpenAI Codex OAuth.
+## Use the console
 
-## Customizability / Self-Dev
+Choose `1` to set a target, `2` for service discovery, `3` for web discovery,
+`4` for vulnerability review, `5` for flags, `6` for local files or `10` for
+the seven-phase full pentest and DOCX report. Enter a custom task at the
+same `cyber >` prompt. `menu`, `result`, `save`, `clear` and `new` are also
+available. Choose `0` to exit; `Ctrl+C` stops the current task.
 
-Jcode is inventing a new form of customizability. One that doesn't limit you to what a plugin or extension can do. Tell your jcode agent to enter self dev mode, and it will start modifying its own source code. Jcode is optimized to iterate on itself. There is significant infrastructure around self development, which allows it to edit, build, and test its own source code, then reload its own binary and continue work in your (potentially many) sessions, fully automatically.
+```bash
+cyber-jcode --target 10.10.10.10
+cyber-jcode --run 'Inspect /tmp/lab-notes.txt'
+cyber-jcode --target 10.10.10.10 --pentest
+cyber-jcode --provider-profile my-api
+cyber-jcode --full-output
+```
 
+Full mode asks before starting and between phases. It saves the recorded
+tool activity to `~/.cyber-jcode/results` and reports to
+`~/.cyber-jcode/reports`. Embedded evidence images are rendered from
+recorded terminal output. See [the console guide](cyber/README.md) for
+phase behavior, evidence details and optional methodology files.
 
-<!-- Add self-dev demo thumbnail/video and fuller writeup here. -->
+## Isolation and updates
 
-## Other
+The public command is `cyber-jcode`. The internal binary remains named
+`target/selfdev/jcode` and is launched directly from this checkout with
+updates and self-development mode disabled. It does not resolve the
+installed `jcode` command from PATH.
 
-- [Token optimization](docs/HARNESS.md#token-optimization)
-- [KV cache](docs/HARNESS.md#kv-cache)
-- [Hill-climbable measurements](docs/HARNESS.md#hill-climbable-measurements)
+Configuration, copied credentials, sessions, workspaces and the socket
+live under `~/.cyber-jcode`. Later changes to original Jcode settings are
+not synchronized. `CYBER_JCODE_HOME` selects another private data directory.
+
+After updating source, run setup again to rebuild the engine if necessary:
+
+```bash
+cd ~/cyber-jcode
+git pull --ff-only
+python3 cyber/install.py
+```
+
+For Python/docs-only changes with an existing `target/selfdev/jcode`, use
+`python3 cyber/install.py --skip-build`. A fresh clone requires the build;
+`--skip-build` does not download an engine. Reopen the console to load
+Python changes. `--link-system` only adds `/usr/local/bin/cyber-jcode` and
+does not perform a full installation.
+
+Cyber-Jcode is a fork of [Jcode by 1jehuang](https://github.com/1jehuang/jcode).
+The original engine source and [license](LICENSE) are retained.

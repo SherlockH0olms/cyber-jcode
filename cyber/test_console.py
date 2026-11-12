@@ -16,7 +16,8 @@ from cyber.console import (Backend, Console, ProgressDisplay, RunProgress, TASKS
                            PENTEST_PHASES, MOTTO, cells,
                            clean, display_tool, fit, forward_command, main, parse_result,
                            read_json, write_json)
-from cyber.install import import_references, import_settings, link_launcher, snapshot
+from cyber.install import (import_references, import_settings, link_launcher,
+                           main as install_main, snapshot)
 from cyber.report import (build_report, parse_engagement_findings,
                           render_terminal_png)
 from PIL import Image
@@ -474,6 +475,36 @@ class ConsoleTests(unittest.TestCase):
             fresh = Path(folder) / "fresh-state"
             import_references(fresh, missing)  # missing sources are skipped silently
             self.assertFalse((fresh / "references").exists())
+
+
+class InstallerTests(unittest.TestCase):
+    def test_original_verification_on_fresh_home_requires_a_valid_snapshot(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder) / "home"
+            state = home / ".cyber-jcode"
+            state.mkdir(parents=True)
+            baseline = state / "original-install-snapshot.json"
+            previous_umask = os.umask(0o077)
+            try:
+                with patch("cyber.install.Path.home", return_value=home), \
+                        patch.dict(os.environ, {"CYBER_JCODE_HOME": str(state)}), \
+                        patch.object(sys, "argv", ["install.py", "--verify-original"]), \
+                        contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    baseline.write_text("{}")
+                    self.assertEqual(install_main(), 0, "No original Jcode is a valid fresh setup")
+                    baseline.unlink()
+                    self.assertEqual(install_main(), 1, "A missing baseline cannot prove isolation")
+                    for invalid in ("invalid JSON", "[]"):
+                        baseline.write_text(invalid)
+                        self.assertEqual(install_main(), 1)
+                    baseline.write_text("{}")
+                    original = home / ".config/jcode/test.env"
+                    original.parent.mkdir(parents=True)
+                    original.write_text("DUMMY_KEY=changed")
+                    self.assertEqual(install_main(), 1, "New original files must still be detected")
+            finally:
+                os.umask(previous_umask)
 
 
 class PentestTests(unittest.TestCase):
