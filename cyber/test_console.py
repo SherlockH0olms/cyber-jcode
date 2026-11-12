@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from cyber.console import (Backend, Console, ProgressDisplay, RunProgress, TASKS,
-                           PENTEST_PHASES, cells,
+                           PENTEST_PHASES, MOTTO, cells,
                            clean, display_tool, fit, forward_command, main, parse_result,
                            read_json, write_json)
 from cyber.install import import_references, import_settings, link_launcher, snapshot
@@ -335,19 +335,25 @@ class ConsoleTests(unittest.TestCase):
                 self.assertEqual(main(["provider", "add", "--help"]), 0)
             self.assertEqual(forward.call_args.args, (Path(folder), ["provider", "add", "--help"]))
 
-    def test_model_header_uses_private_defaults_and_selected_profile(self):
+    def test_menu_shows_motto_and_hides_engine_identity(self):
+        # The menu must not leak the engine/model identity: a motto is shown
+        # instead, and no configured model name appears anywhere in the output.
         with tempfile.TemporaryDirectory() as folder:
             state = Path(folder)
             (state / "engine").mkdir()
             (state / "engine/config.toml").write_text(
-                '[provider]\ndefault_provider="my-api"\ndefault_model="current-model"\n'
-                '[providers.other]\ndefault_model="other-model"\napi_key="HIDDEN_KEY"\n')
+                '[provider]\ndefault_provider="my-api"\ndefault_model="SECRET_MODEL_NAME"\n')
             console = Console(state, args())
-            self.assertEqual(console.model_label(), "current-model")
-            console.profile = "other"
-            self.assertEqual(console.model_label(), "other-model")
-            console.model = "explicit-model"
-            self.assertEqual(console.model_label(), "explicit-model")
+            console.model = "SECRET_MODEL_NAME"
+            console.target = "10.10.10.10"
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                console.menu()
+            rendered = output.getvalue()
+            self.assertIn(MOTTO, rendered)
+            self.assertIn("TARGET", rendered)
+            self.assertNotIn("SECRET_MODEL_NAME", rendered)
+            self.assertNotIn("MODEL", rendered)
 
     def test_existing_launcher_is_preserved(self):
         with tempfile.TemporaryDirectory() as folder:

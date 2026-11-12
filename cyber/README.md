@@ -18,7 +18,9 @@ for a short **real model response** without tools or changes to your lab session
 
 During a task, one status row shows elapsed time, the current phase or tool name,
 and completed/active tool counts. Redirected output gets a status line every
-ten seconds. This is activity information, not a completion estimate. Reasoning,
+ten seconds. This is activity information, not a completion estimate. The menu
+shows the target and a motto instead of the engine or model identity: no model
+fingerprints are displayed anywhere in the console. Reasoning,
 chat streams and tool inputs stay hidden. Up to four short English findings
 appear first, followed by actual tool outputs, including written notes and
 port/service tables. Background task envelopes are removed; their actual

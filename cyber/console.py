@@ -16,7 +16,6 @@ import signal
 import subprocess
 import sys
 import time
-import tomllib
 from typing import Callable
 import unicodedata
 
@@ -41,6 +40,9 @@ TASKS = {
           "Briefly report any missing information or access."),
 }
 GREETINGS = {"hi", "hello", "hey", "ping"}
+
+# A quiet motto on the menu instead of the engine identity: no fingerprints.
+MOTTO = "Fighting in the shadows so others may live in the sun"
 
 # Full pentest engagement phases, executed in order until blocked or stopped.
 PENTEST_PHASES = (
@@ -565,22 +567,6 @@ class Console:
             "last_docx": self.last_docx,
         })
 
-    def model_label(self) -> str:
-        if self.model:
-            return self.model
-        try:
-            with (self.state / "engine/config.toml").open("rb") as stream:
-                config = tomllib.load(stream)
-            defaults = config.get("provider", {})
-            selected = self.profile or (defaults.get("default_provider", "")
-                                        if self.provider == "auto" else self.provider)
-            named = config.get("providers", {}).get(selected, {})
-            return str(named.get("default_model") or
-                       (defaults.get("default_model") if self.provider == "auto" else "") or
-                       "provider default")
-        except (OSError, ValueError, TypeError, AttributeError):
-            return "provider default"
-
     def banner(self):
         if self.width >= 58:
             for row in (
@@ -599,7 +585,7 @@ class Console:
     def menu(self):
         self.line("=" * min(62, self.width), "32")
         self.line(f"  TARGET: {self.target or 'not set'}")
-        self.line(f"  MODEL : {self.model_label()}")
+        self.prose(MOTTO, "  ", "36")
         self.line("-" * min(62, self.width), "32")
         for row in (
             "  [1] Set target", "  [2] Port / service discovery", "  [3] Web discovery",
@@ -937,7 +923,7 @@ class Console:
 
     def settings_menu(self):
         while True:
-            self.line(f"  Provider: {self.provider}  Model: {self.model_label()}")
+            self.line(f"  Provider: {self.provider}  Model: {self.model or 'provider default'}")
             for row in ("  [1] Change provider", "  [2] Change model",
                         "  [3] Connection check", "  [4] Login / connection",
                         "  [5] List models", "  [6] Provider profile", "  [0] Back"):
