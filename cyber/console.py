@@ -19,7 +19,7 @@ import time
 from typing import Callable
 import unicodedata
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 ROOT = Path(__file__).resolve().parent.parent
 ANSI = re.compile(
     r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|"
@@ -56,7 +56,7 @@ PENTEST_PHASES = (
      "discovered usernames. Preserve all discovered credentials and notes in the "
      "workspace for later phases."),
     ("web", "WEB ANALYSIS", "Analyze every web service: fingerprint with whatweb, "
-     "capture and review the main pages, enumerate directories and files with "
+     "capture real browser screenshots and inspect pages through HTTP/DOM text, enumerate directories and files with "
      "feroxbuster/ffuf/gobuster, review robots.txt, identify frameworks/CMS and "
      "their versions, examine forms, uploads and APIs. Note every interesting "
      "endpoint, file, parameter and technology."),
@@ -249,13 +249,20 @@ def parse_result(text: str) -> dict:
 
 def error_message(text: str) -> str:
     text = text.lower()
-    if any(part in text for part in ("401", "403", "api key", "api_key", "credential", "unauthorized", "auth")):
+    if any(part in text for part in ("does not support image", "unsupported image", "image inputs are not supported")):
+        return "Model rejects image input. Text-only protection is required; rebuild Cyber-Jcode's engine."
+    if re.search(r"\b(?:status(?:\s+code)?\s*[:=]?\s*)?(401|403)\b", text) or any(
+            part in text for part in ("invalid api key", "incorrect api key", "missing api key", "unauthorized", "authentication failed")):
         return "Model authentication failed. Settings > Login / connection."
     if any(part in text for part in ("429", "rate limit", "quota", "credit", "balance")):
         return "Model usage limit reached. Try again later."
     if any(part in text for part in ("timeout", "timed out")):
         return "Operation timed out."
-    if any(part in text for part in ("connect", "dns", "network", "resolve", "502", "503")):
+    if any(part in text for part in ("does not support tool", "unsupported tool", "tool calling is not supported")):
+        return "Model does not support tool calling. Select a tool-capable model."
+    if "400 bad request" in text or re.search(r"status\s*:\s*400\b", text):
+        return "Model rejected the request format. Check model compatibility and connection settings."
+    if any(part in text for part in ("connection refused", "connection error", "dns", "network", "resolve", "502", "503")):
         return "Model server unreachable. Check the connection."
     return "Operation failed. Settings > Connection check."
 
@@ -330,9 +337,10 @@ class Backend:
         env.update({
             "JCODE_HOME": str(self.state / "engine"),
             "JCODE_RUNTIME_DIR": str(self.state / "run"),
-            "JCODE_SOCKET": str(self.state / "run/agent.sock"),
+            "JCODE_SOCKET": str(self.state / "run/agent-textonly-v1.sock"),
             "JCODE_INSTALL_DIR": str(self.state / "engine/builds"),
             "JCODE_RUN_AUTO_POKE_MAX_TURNS": "6",
+            "JCODE_DISABLE_IMAGE_INPUT": "1",
             "XDG_CONFIG_HOME": str(self.state / "engine/config"),
             "XDG_CACHE_HOME": str(self.state / "engine/cache"),
             "XDG_DATA_HOME": str(self.state / "engine/data"),
@@ -342,7 +350,7 @@ class Backend:
 
     def command(self, provider: str = "auto", model: str = "", profile: str = "") -> list[str]:
         cmd = [str(self.binary), "--no-update", "--no-selfdev", "--quiet",
-               "--socket", str(self.state / "run/agent.sock"), "--provider", provider]
+               "--socket", str(self.state / "run/agent-textonly-v1.sock"), "--provider", provider]
         if model:
             cmd.extend(["--model", model])
         if profile:
@@ -591,7 +599,8 @@ class Console:
             "  [1] Set target", "  [2] Port / service discovery", "  [3] Web discovery",
             "  [4] Review vulnerabilities", "  [5] Find flags", "  [6] Analyze file",
             "  [7] Show last result", "  [8] Settings", "  [9] New session",
-            "  [10] Full pentest (recon to root) + DOCX report", "  [0] Exit",
+            "  [10] Full pentest (recon to root) + DOCX report",
+            "  [11] Session history", "  [0] Exit",
         ):
             self.line(row)
         self.line("-" * min(62, self.width), "32")
@@ -617,10 +626,20 @@ class Console:
     def prompt(self, task: str, task_label: str = "") -> str:
         filename = "policy-pentest.txt" if task_label.startswith("PENTEST") else "policy.txt"
         policy = (ROOT / "cyber" / filename).read_text(encoding="utf-8")
+        policy += ("\nSCREENSHOT RULE (all tasks): NEVER read, view, attach, decode, OCR or visually "
+                   "inspect screenshot/image files. Never send them to the model, even to verify a report. "
+                   "Use HTTP/DOM/text command output for analysis. Capture files using the terminal helper; "
+                   "read only its JSON metadata. The local Word exporter embeds the images. "
+                   "If image reading is blocked, continue the assessment without retrying it.")
         context = f"Target: {self.target or '(not set)'}\nWorkspace: {self.workspace()}"
         if self.verified_flags:
             context += "\nVerified flags so far: " + ", ".join(self.verified_flags)
         if task_label.startswith("PENTEST"):
+            policy += "\n\nMANDATORY REPORTING HANDBOOK — apply before writing report data:\n" + (
+                ROOT / "cyber/reporting-handbook.md").read_text(encoding="utf-8")
+            context += (f"\nReal screenshot command: python3 {ROOT / 'cyber/capture.py'} "
+                        "--url http://LAB_TARGET/ --output /absolute/evidence/path/new-file.png"
+                        "\nTemplate: enterprise-pentest.docx (used by the exporter; do not open the binary in model tools).")
             context += "\nREFERENCE HANDBOOKS (read relevant sections as needed):"
             for filename in ("pentest.txt", "dehset_pentest_araclari.txt"):
                 path = self.state / "references" / filename
@@ -681,6 +700,7 @@ class Console:
                 report["engagement_findings"] = link_findings(details["findings"], result.tools)
                 report["access"] = verified_access(details["access"], result.tools, self.target)
                 report["limitations"] = details["limitations"]
+                report["screenshots"] = details["screenshots"]
             except ImportError:
                 report["engagement_findings"] = []
         path = self.state / "results" / f"{stamp}.json"
@@ -784,6 +804,8 @@ class Console:
         report = read_json(Path(self.last_path))
         if report:
             self.show_result(report)
+            if report.get("docx_path"):
+                self.prose(report["docx_path"], "[+] DOCX: ", "32")
         else:
             self.line("[!] Result file not found.", "33")
 
@@ -793,6 +815,41 @@ class Console:
             return
         # The complete tool outputs already exist in this private local file.
         self.line(f"[+] Saved: {self.last_path}", "32")
+        if self.last_docx:
+            self.prose(self.last_docx, "[+] DOCX: ", "32")
+
+    def session_history(self):
+        from cyber.history import saved_results
+        records = saved_results(self.state)
+        if not records:
+            self.line("[!] No saved sessions or reports yet.", "33")
+            return
+        self.line("  SESSION HISTORY | saved results", "36")
+        for index, (path, record) in enumerate(records, 1):
+            label = "PENTEST REPORT" if "phases" in record else record.get("label", "TASK")
+            self.prose(f"[{index}] {path.stem} | {record.get('target') or 'not set'} | {label}", "  ")
+        choice = self.ask("history number (0: back) > ")
+        if not choice.isdecimal() or not 1 <= int(choice) <= len(records):
+            return
+        path, record = records[int(choice) - 1]
+        if "phases" in record:
+            self.prose(f"{record.get('target')} | {len(record.get('phases', []))}/7 phases | "
+                       f"{len(record.get('findings', []))} findings", "[+] ")
+            for finding in record.get("findings", []):
+                self.prose(f"{finding.get('severity', 'info').upper()}: {finding.get('title', '')}", "[V] ")
+            if record.get("docx_path"):
+                self.prose(record["docx_path"], "[+] DOCX: ", "32")
+            else:
+                stamp = path.stem.removeprefix("pentest-")
+                legacy = self.state / "reports" / f"pentest-{stamp}.docx"
+                if legacy.is_file():
+                    self.prose(str(legacy), "[+] DOCX: ", "32")
+            for tool in record.get("tools", []):
+                if visible_tool(str(tool.get("name", ""))):
+                    self.show_tool(tool)
+        else:
+            self.show_result(record)
+        self.prose(str(path), "[+] Saved data: ", "32")
 
     def check_connection(self) -> bool:
         report = self.execute("Connection check: use bash to run only printf CYBER_OK. "
@@ -824,9 +881,11 @@ class Console:
             self.line("[*] Engagement cancelled.", "36")
             return False
         started = datetime.now(timezone.utc).isoformat()
-        evidence = self.state / "labs" / "evidence"
+        run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        evidence = self.workspace() / "evidence" / run_stamp
+        private_dir(evidence)
         engagement = {"target": self.target, "started": started, "phases": [],
-                      "findings": [], "tools": [], "screenshots": [], "flags": []}
+                      "findings": [], "tools": [], "screenshots": [], "flags": [], "limitations": []}
         phase_reports: list[dict] = []
         status_by_phase: dict[str, str] = {}
         skip_next_phase = False
@@ -840,6 +899,8 @@ class Console:
             self.line(f"[PHASE {index}/{len(PENTEST_PHASES)}] {label}", "36")
             # Continuity: earlier phases' compact outputs are the engagement context.
             context_parts = ["Prior verified flags: " + (", ".join(self.verified_flags) or "none")]
+            context_parts.append(f"Capture real screenshot files only under: {evidence}. "
+                                 "Never read the images. Capture helper JSON is the only model-visible result.")
             for prior in phase_reports:
                 prior_phase = prior.get("phase") or "prior"
                 context_parts.append(f"{prior_phase} phase status: {status_by_phase.get(prior_phase, 'partial')}; "
@@ -862,7 +923,11 @@ class Console:
             status_by_phase[phase] = str(report.get("summary", {}).get("status", "partial"))
             engagement["phases"].append({
                 "phase": phase, "label": label, "elapsed": report.get("elapsed", 0),
-                "status": report.get("summary", {}).get("status", "partial")})
+                "status": "stopped" if report.get("error") and report["error"] != "Operation stopped."
+                          else report.get("summary", {}).get("status", "partial")})
+            engagement["limitations"].extend(report.get("limitations", []))
+            if report.get("error"):
+                engagement["limitations"].append(f"{label}: {report['error']}")
             for finding in report.get("engagement_findings") or []:
                 engagement["findings"].append(finding)
             for tool in report.get("tools", []):
@@ -871,16 +936,8 @@ class Console:
                 engagement["tools"].append(tool_entry)
             engagement["flags"] = list(dict.fromkeys(
                 self.verified_flags + report.get("summary", {}).get("flags", [])))
-            # Terminal-style evidence PNG for this phase's tool transcript.
-            transcript = "\n".join(
-                f"[{'!' if t.get('error') else '+'}] {t.get('name')}:\n{t.get('output', '')}"
-                for t in report.get("tools", []))
-            shot = report_module.render_terminal_png(
-                transcript, evidence / f"phase-{index:02d}-{phase}.png",
-                title=f"Phase {index}/{len(PENTEST_PHASES)} - {label} - {self.target}")
-            if shot:
-                engagement["screenshots"].append(
-                    {"title": f"Phase {index}: {label}", "path": str(shot)})
+            engagement["screenshots"].extend(report_module.collect_screenshots(
+                report.get("tools", []), evidence, phase=phase))
             status = report.get("summary", {}).get("status", "partial")
             if status == "blocked":
                 answer = self.ask("Phase reported BLOCKED. Continue to the next phase? (y/n) > ")
@@ -894,31 +951,43 @@ class Console:
                     continue
                 if answer.lower() not in ("y", "yes", "evet", ""):
                     break
-        # Determine the recorded access level from the final phases.
-        final_access = "Initial foothold or higher (see phase results)" if any(
-            status_by_phase.get(phase) == "ok" for phase in ("exploit", "privesc")
-        ) else "No verified access level recorded"
+        levels = {"user": 1, "administrator": 2, "root": 3, "system": 3}
+        accesses = [p["access"] for p in phase_reports if p.get("access")]
+        access = max(accesses, key=lambda item: levels.get(item["level"], 0), default=None)
+        final_access = (f"Verified {access['level']} access on {access['target']}" if access
+                        else "No verified target access recorded")
         engagement["finished"] = datetime.now(timezone.utc).isoformat()
         engagement["final_access"] = final_access
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        engagement["session_id"] = self.session_id
+        engagement["status"] = "complete" if len(engagement["phases"]) == 7 and all(
+            p["status"] == "ok" for p in engagement["phases"]) else "partial"
+        stamp = run_stamp
         engagement_path = self.state / "results" / f"pentest-{stamp}.json"
         write_json(engagement_path, engagement)
         try:
             docx_path = report_module.build_report(engagement, self.state / "reports" / f"pentest-{stamp}.docx")
             self.line(f"[+] Engagement data: {engagement_path}", "32")
             self.line(f"[+] DOCX report    : {docx_path}", "32")
-            try:  # also copy the report where Windows can open it easily
-                windows_dir = Path("/mnt/c/Users/ASUS/Desktop")
-                if windows_dir.is_dir():
-                    import shutil as _shutil
-                    copied = windows_dir / f"cyber-jcode-pentest-{stamp}.docx"
-                    _shutil.copyfile(docx_path, copied)
-                    self.line(f"[+] Windows copy  : {copied}", "32")
-            except OSError:
-                pass
+            from cyber.report_layout import desktop_report_folder, report_filename
+            destination = desktop_report_folder()
+            if destination is None:
+                destination = Path.home() / "Desktop/raport"
+            private_dir(destination)
+            copied = destination / report_filename(self.target, stamp)
+            shutil.copyfile(docx_path, copied)
+            shutil.copyfile(docx_path.with_suffix(".transcript.txt"), copied.with_suffix(".transcript.txt"))
+            self.last_docx = str(copied)
+            self.last_path = str(engagement_path)
+            engagement["docx_path"] = str(copied)
+            write_json(engagement_path, engagement)
+            self.persist()
+            self.prose(str(copied), "[+] Report: ", "32")
         except ImportError:
             self.line("[!] python-docx / Pillow missing: pip install python-docx pillow", "31")
             self.line(f"[+] Engagement data: {engagement_path}", "32")
+        except (OSError, ValueError) as error:
+            self.prose(str(error), "[!] Report export failed: ", "31")
+            self.prose(str(engagement_path), "[+] Engagement data preserved: ")
         return True
 
     def settings_menu(self):
@@ -993,6 +1062,9 @@ class Console:
                     self.print_models(value)
 
     def loop(self) -> int:
+        if getattr(self.args, "sessions", False):
+            self.session_history()
+            return 0
         self.banner()
         self.menu()
         if self.args.menu:
@@ -1045,6 +1117,8 @@ class Console:
                     self.line("[+] New session ready.", "32")
                 elif choice in ("10", "pentest", "full", "tam"):
                     self.run_pentest()
+                elif choice in ("11", "sessions", "history"):
+                    self.session_history()
                 elif choice in ("save", "kaydet"):
                     self.save_result()
                 elif choice in ("clear", "temizle"):
@@ -1086,6 +1160,8 @@ def forward_command(state: Path, argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv == ["sessions"]:
+        argv = ["--sessions"]
     parser = argparse.ArgumentParser(
         prog="cyber-jcode", description="TryHackMe lab terminal",
         epilog="Jcode configuration commands: cyber-jcode provider|model|auth|login ...",
@@ -1104,6 +1180,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--run", help="Run one task and exit")
     mode.add_argument("--pentest", action="store_true",
                       help="Run the full phased pentest engagement and produce a DOCX report")
+    mode.add_argument("--sessions", action="store_true", help="Browse saved sessions and report paths")
     forwarded = bool(argv and argv[0] in ("provider", "model", "auth", "login"))
     args = None if forwarded else parser.parse_args(argv)
     state = Path(os.environ.get("CYBER_JCODE_HOME", str(Path.home() / ".cyber-jcode"))).expanduser().resolve()

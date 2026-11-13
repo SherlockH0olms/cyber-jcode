@@ -95,7 +95,8 @@ impl Provider for OpenRouterProvider {
             Self::strict_openai_schema_endpoint(self.profile_id.as_deref(), &self.api_base);
         let allow_reasoning = allow_reasoning && !strict_openai_schema;
         let include_reasoning_content = include_reasoning_content && !strict_openai_schema;
-        let allow_image_input = self.supports_image_input();
+        let allow_image_input =
+            self.supports_image_input() && !jcode_message_types::image_inputs_disabled();
 
         let mut effective_messages: Vec<Message> = messages.to_vec();
         let cache_supported = self.model_supports_cache(&model).await;

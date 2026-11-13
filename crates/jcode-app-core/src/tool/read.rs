@@ -170,6 +170,12 @@ impl Tool for ReadTool {
 
         // Check for image files and display in terminal if supported
         if is_image_file(&path) {
+            if jcode_message_types::image_inputs_disabled() {
+                return Ok(ToolOutput::new(format!(
+                    "Screenshot retained on disk: {}. Image reading is disabled. Do not retry, attach or view it; use capture metadata and text evidence. The report exporter embeds the file.",
+                    params.file_path
+                )));
+            }
             return handle_image_file(&path, &params.file_path);
         }
 

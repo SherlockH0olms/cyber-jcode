@@ -1059,6 +1059,11 @@ impl Registry {
         let _in_flight = inflight::mark_tool_in_flight(&ctx.tool_call_id);
         let tools = self.tools.read().await;
         let resolved_name = Self::resolve_tool_name_for_session(&ctx.session_id, name);
+        if jcode_message_types::image_inputs_disabled() && resolved_name == "computer" {
+            return Ok(ToolOutput::new(
+                "Image viewing is disabled. Capture evidence through the terminal helper and continue with text evidence.",
+            ));
+        }
         let is_custom = sdk::custom(&ctx.session_id, resolved_name);
         if is_custom && let Some(config) = sdk::config(&ctx.session_id) {
             let disabled = config.disabled.into_iter().collect();
@@ -1219,6 +1224,10 @@ impl Registry {
         let call_key = withheld_call_key(resolved_name, &input);
         let accepted =
             accepts_large_output(&input) | take_repeated_withheld_call(&ctx.session_id, call_key);
+        if jcode_message_types::image_inputs_disabled() && !output.images.is_empty() {
+            output.images.clear();
+            output.output.push_str("\n[Image attachments omitted. Never read or attach screenshots; continue with text evidence.]");
+        }
         let already_marked = output.output.starts_with(OUTPUT_WITHHELD_MARKER);
         output = self.guard_context_overflow(name, output, accepted).await;
         if !already_marked && output.output.starts_with(OUTPUT_WITHHELD_MARKER) {

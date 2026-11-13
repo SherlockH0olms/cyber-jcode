@@ -16,7 +16,7 @@ Install the build tools and report dependencies:
 ```bash
 sudo apt update
 sudo apt install -y git curl ca-certificates build-essential pkg-config \
-  libssl-dev perl cmake python3 python3-docx python3-pil fonts-dejavu-core
+  libssl-dev perl cmake python3 python3-docx python3-pil fonts-dejavu-core chromium
 ```
 
 Install the current stable Rust toolchain if Rust is not already installed:
@@ -134,11 +134,16 @@ cyber-jcode --provider-profile my-api
 cyber-jcode --full-output
 ```
 
-Full mode asks before starting and between phases. It saves the recorded
-tool activity to `~/.cyber-jcode/results` and reports to
-`~/.cyber-jcode/reports`. Embedded evidence images are rendered from
-recorded terminal output. See [the console guide](cyber/README.md) for
-phase behavior, evidence details and optional methodology files.
+Full mode asks before starting and between phases. It saves recorded tool
+activity privately in `~/.cyber-jcode/results`. User-facing DOCX reports and
+their full text transcripts go inside **Desktop/raport**, including the Windows
+Desktop under WSL. Report filenames include the target and UTC timestamp.
+The exporter uses the [Word template](cyber/templates/enterprise-pentest.docx)
+and every phase receives the mandatory [reporting handbook](cyber/reporting-handbook.md).
+Real Chromium captures are embedded only after artifact verification; terminal
+text is kept as text. Screenshot/image inputs are disabled for all models and
+tasks, including resumed history. Type `sessions` or choose `[11]` to browse
+saved results without changing the active session. See [the console guide](cyber/README.md).
 
 ## Isolation and updates
 

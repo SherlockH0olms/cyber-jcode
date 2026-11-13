@@ -65,19 +65,60 @@ completes (bash commands are shown with their command line). The full recorded
 transcript, per-tool command/output pairs and evidence identifiers are kept in
 the engagement JSON, and the DOCX appendix reproduces each recorded tool result.
 
-The engagement ends with `~/.cyber-jcode/results/pentest-<stamp>.json` (all
-data) and `~/.cyber-jcode/reports/pentest-<stamp>.docx`. On the original WSL
-setup, it also attempts a copy to `/mnt/c/Users/ASUS/Desktop` when that
-directory exists; other machines should use the report path printed by the
-console. The report contains: cover, executive summary, methodology table,
-findings overview and detail tables sorted by severity (with evidence-linked
-validation and reproduction steps), tool activity log, embedded terminal-style
-evidence images per phase, conclusion with observed flags, and an appendix with
-each recorded tool invocation and output. The embedded images are rendered
-from recorded tool output, not live browser or desktop screenshots.
-Report dependencies are `python-docx` and Pillow; the
+The engagement saves a private JSON record and DOCX in `~/.cyber-jcode/results`
+and `~/.cyber-jcode/reports`. Its user-facing DOCX and full `.transcript.txt`
+are saved **inside Desktop/raport**, never at the Desktop root. WSL discovers
+the Windows Desktop; Linux uses `~/Desktop/raport`. Names include assessment
+type, target and UTC timestamp. The console prints the path; `save`, `result`
+and session history expose it again. `CYBER_JCODE_REPORT_DIR` overrides the
+export folder for custom environments and automated tests.
+
+The supplied [Word template](templates/enterprise-pentest.docx) controls the
+restrained grayscale layout. Every full-pentest phase receives the mandatory
+[reporting handbook](reporting-handbook.md): enterprise English, traceable
+findings, reproduction/remediation/retest, coverage limitations, Word styles,
+tables, evidence captions and document review. Every recorded tool appears in
+the activity log and appendix with a concise excerpt; the companion transcript
+keeps full captured text. Execution success alone never proves target access.
+
+### Real screenshots and text-only model protection
+
+Chromium captures real browser pixels. Use the official helper through `bash`:
+
+```bash
+python3 /path/to/cyber-jcode/cyber/capture.py \
+  --url http://LAB_TARGET/ \
+  --output /absolute/per-run/evidence/path/web-home.png
+```
+
+The helper refuses to overwrite evidence and returns text JSON containing path,
+time, hash, dimensions and capture method. Full-pentest prompts specify the
+per-run evidence directory. The exporter checks successful capture output, the
+metadata sidecar, hash and PNG before embedding. A captured browser error page
+is still an error page; confirm page behavior from HTTP/DOM text. Missing capture
+evidence is disclosed rather than replaced with a rendered terminal image.
+
+**Models must never read, view, attach, decode or OCR screenshot files.** This
+applies to all tasks and models, including report previews. Cyber-Jcode sets
+`JCODE_DISABLE_IMAGE_INPUT=1`: the engine blocks image reads/computer viewing,
+removes image attachments from tool responses, and projects old session images
+as short text placeholders. Persisted evidence and text history are preserved.
+The exporter loads image files locally; the model sees only capture metadata.
+After upgrading from 0.3, rebuild via `python3 cyber/install.py` and reopen the
+console. The isolated socket separates any optional tool server from older sessions.
+Do not restart an assessment solely because a screenshot read was blocked.
+
+### Session history
+
+Type `sessions` / `history` or choose `[11]` to list saved task results and
+pentest reports. Select a number to see findings, tool output and report paths.
+From the Linux shell, `cyber-jcode sessions` or `cyber-jcode --sessions` opens it directly.
+Browsing is read-only and preserves the active session, target and last result;
+AI conversations/reasoning are never shown. `[9]` still starts a new session.
+
+Report dependencies are `python-docx`, Pillow and Chromium; the
 [installation guide](../README.md#install-on-kali--debian--ubuntu--wsl)
-installs their distribution packages.
+installs distribution packages.
 
 The installer also copies `pentest.txt` and `dehset_pentest_araclari.txt` from
 `/mnt/c/Users/ASUS/Desktop` into `~/.cyber-jcode/references` when available

@@ -510,6 +510,14 @@ class InstallerTests(unittest.TestCase):
 class PentestTests(unittest.TestCase):
     """Full pentest mode: phases, engagement findings, screenshots, DOCX report."""
 
+    def setUp(self):
+        # Export tests must never populate the user's Desktop.
+        folder = tempfile.TemporaryDirectory(prefix="cyber-test-exports-")
+        self.addCleanup(folder.cleanup)
+        guard = patch.dict(os.environ, {"CYBER_JCODE_REPORT_DIR": folder.name})
+        guard.start()
+        self.addCleanup(guard.stop)
+
     def test_pentest_policy_and_phases_exist(self):
         policy = (Path(__file__).resolve().parent.parent / "cyber/policy-pentest.txt").read_text()
         self.assertIn("CYBER_FINDINGS", policy)
@@ -569,7 +577,7 @@ class PentestTests(unittest.TestCase):
             headings = [p.text for p in doc.paragraphs if p.style.name.startswith(("Title", "Heading"))]
             self.assertIn("1. Executive Summary", headings)
             self.assertIn("4. Tool Activity Log", headings)
-            self.assertTrue(doc.inline_shapes)  # phase screenshot embedded
+            self.assertFalse(doc.inline_shapes)  # no authentic capture was performed
 
     def test_run_pentest_requires_target(self):
         with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):
@@ -737,7 +745,7 @@ class ReportTests(unittest.TestCase):
                             "5. Evidence", "6. Conclusion"):
                 self.assertIn(section, text)
             self.assertIn("Anonymous FTP", text)
-            self.assertTrue(doc.inline_shapes)
+            self.assertFalse(doc.inline_shapes)  # rendered transcript is not a screenshot
             self.assertGreaterEqual(len(doc.tables), 4)  # cover, methodology, findings overview, detail, tools
 
 

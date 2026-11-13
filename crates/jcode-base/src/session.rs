@@ -60,7 +60,16 @@ pub use storage_paths::{session_exists, session_journal_path, session_path};
 pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdown};
 
 fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
-    messages.iter().map(StoredMessage::to_message).collect()
+    messages
+        .iter()
+        .map(|stored| {
+            let mut message = stored.to_message();
+            if jcode_message_types::image_inputs_disabled() {
+                message.omit_image_inputs();
+            }
+            message
+        })
+        .collect()
 }
 
 fn message_has_tool_image(content: &[ContentBlock]) -> bool {
@@ -612,7 +621,10 @@ impl Session {
         self.memory_profile_cache.provider_cache_stats = ContentBlockMemoryStats::default();
     }
 
-    fn push_provider_message_cache_entry(&mut self, message: Message) {
+    fn push_provider_message_cache_entry(&mut self, mut message: Message) {
+        if jcode_message_types::image_inputs_disabled() {
+            message.omit_image_inputs();
+        }
         let message_hash = crate::message::stable_message_hash(&message);
         let prefix_hash = self
             .provider_message_prefix_hashes_cache

@@ -233,6 +233,18 @@ pub enum ContentBlock {
 }
 
 impl Message {
+    /// Project text-only context without modifying the persisted evidence.
+    pub fn omit_image_inputs(&mut self) {
+        for block in &mut self.content {
+            if matches!(block, ContentBlock::Image { .. }) {
+                *block = ContentBlock::Text {
+                    text: "[Screenshot retained on disk. Image input disabled; do not read, view, attach or retry it. Continue using text evidence.]".to_string(),
+                    cache_control: None,
+                };
+            }
+        }
+    }
+
     pub fn user(text: &str) -> Self {
         Self {
             role: Role::User,
@@ -384,6 +396,35 @@ impl Message {
                 msg
             })
             .collect()
+    }
+}
+
+/// Opt-in process policy used by the separate Cyber-Jcode runtime.
+pub fn image_inputs_disabled() -> bool {
+    std::env::var("JCODE_DISABLE_IMAGE_INPUT").is_ok_and(|value| value == "1")
+}
+
+#[cfg(test)]
+mod text_only_policy_tests {
+    use super::*;
+
+    #[test]
+    fn image_projection_preserves_text_and_original_evidence() {
+        let original = Message::user_with_images(
+            "continue this assessment",
+            vec![("image/png".into(), "private-image-data".into())],
+        );
+        let mut projected = original.clone();
+        projected.omit_image_inputs();
+        let encoded = serde_json::to_string(&projected).unwrap();
+        assert!(!encoded.contains("private-image-data"));
+        assert!(encoded.contains("continue this assessment"));
+        assert!(
+            original
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. }))
+        );
     }
 }
 
