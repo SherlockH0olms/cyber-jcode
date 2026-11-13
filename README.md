@@ -134,6 +134,12 @@ stops the task. Text entered at a phase transition becomes an instruction for
 the next phase; it does not end the engagement. Tool headings use plain English
 action names, while complete source identifiers remain in the saved evidence.
 
+An interrupted pentest keeps its phase checkpoint. Type `resume`, or choose
+`10` and select Resume, to continue the same target and session. Completed
+phases are retained; the interrupted phase receives its previous evidence and
+instructions to continue from the unfinished step. Stopped commands or lost
+connections may need restarting. Reports and transcripts update the same files.
+
 ```bash
 cyber-jcode --target 10.10.10.10
 cyber-jcode --run 'Inspect /tmp/lab-notes.txt'
@@ -150,8 +156,10 @@ The exporter uses the [Word template](cyber/templates/enterprise-pentest.docx)
 and every phase receives the mandatory [reporting handbook](cyber/reporting-handbook.md).
 Real Chromium captures are embedded only after artifact verification; terminal
 text is kept as text. Screenshot/image inputs are disabled for all models and
-tasks, including resumed history. Type `sessions` or choose `[11]` to browse
-saved results without changing the active session. See [the console guide](cyber/README.md).
+tasks, including resumed history. Type `sessions` or choose `[11]`, select a
+record and choose Enter to view it or `r` to open that session. Then use `10`
+or `resume` to continue its pentest. Viewing alone preserves the active session.
+See [the console guide](cyber/README.md).
 
 ## Isolation and updates
 

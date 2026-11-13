@@ -141,6 +141,39 @@ class EngineTextOnlyTests(unittest.TestCase):
                 self.assertIn("LIVE_STEERING_CLUE", json.dumps(requests))
                 self.assertIn("applied", notices)
                 self.assertEqual(steered.pending_instructions, [])
+
+                # Explicit cancellation must still leave a resumable engine
+                # session. Only the harmless local process is stopped here.
+                emitted_read = False
+                async def interrupt_local_command():
+                    active = asyncio.Event()
+                    def progress(state):
+                        if "bash" in state.active.values():
+                            active.set()
+                    task = asyncio.create_task(backend.run("CANCELLED_PHASE_MARKER: run the local test command.",
+                        root / "workspace", result.session_id, "openai-compatible", "text-only-test-model", "local-image-test",
+                        progress=progress, capture_tools=True))
+                    try:
+                        await asyncio.wait_for(active.wait(), 15)
+                        await asyncio.sleep(0.1)
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                    finally:
+                        if not task.done():
+                            task.cancel()
+                            await asyncio.gather(task, return_exceptions=True)
+                asyncio.run(interrupt_local_command())
+                self.assertIsNotNone(backend.interrupted_result)
+                self.assertEqual(backend.interrupted_result.error, "Operation stopped.")
+                self.assertEqual(backend.interrupted_result.session_id, result.session_id)
+                offset = len(requests)
+                continued = asyncio.run(run(result.session_id))
+                self.assertIsNone(continued.error, continued.error)
+                self.assertEqual(continued.session_id, result.session_id)
+                history = json.dumps(requests[offset:])
+                self.assertIn("CANCELLED_PHASE_MARKER", history)
+                self.assertIn("TEXT_CONTEXT_MARKER", history)
+                self.assertNotIn("PRIVATE_LEGACY_IMAGE", history)
             finally:
                 server.shutdown()
                 server.server_close()

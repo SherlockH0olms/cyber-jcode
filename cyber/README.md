@@ -67,12 +67,27 @@ actions such as `Nmap | Port and service scan` and `File | Save evidence`.
 `10` (or `--pentest`) runs an authorized-lab engagement through seven ordered
 phases. Each phase is a real agent turn: prior phase results travel forward as
 engagement context, and the console asks before each next phase (Enter or y =
-run, n = stop and report, s = skip that phase). Ctrl+C mid-phase keeps the
-partial tool outputs and records the phase as partial; the engagement report is
-still produced. Every phase must report only tool-verified vulnerabilities, each
+run, n = pause and report, s = skip that phase). Ctrl+C mid-phase keeps the
+partial tool outputs, saves a checkpoint and returns to the console; a partial
+engagement report is still produced. Every phase must report only tool-verified vulnerabilities, each
 with title, severity, category, evidence, impact and remediation. The goal is
 maximum progress to root/SYSTEM, not the first flag; the report documents the
 full attack surface and chain.
+
+Type `resume`, or choose `10` and Resume, to continue an unfinished pentest in
+the same target/session. Checkpoints are saved before execution, after each
+phase and before phase questions, and survive reopening the console. Completed
+phases and all prior evidence are retained. The model receives the interrupted
+phase's context and reads saved text evidence as needed to avoid repeating
+completed work. A terminated command cannot resume its operating-system process;
+unfinished commands or lost shell connections may need restoring. The same
+engagement JSON, evidence directory, DOCX and transcript are updated on each run.
+`10` also offers New engagement; changing targets or `[9]` detaches old progress
+while preserving its archived record.
+
+The underlying Jcode agent still performs its supported automatic context
+compaction and recovery in the background. Compaction summaries belong to the
+private engine session; recorded pentest tool evidence is kept separately.
 
 During each phase the console streams every tool invocation and its result as it
 completes (bash commands are shown with their command line). The full recorded
@@ -125,9 +140,13 @@ Do not restart an assessment solely because a screenshot read was blocked.
 ### Session history
 
 Type `sessions` / `history` or choose `[11]` to list saved task results and
-pentest reports. Select a number to see findings, tool output and report paths.
+pentest reports. Select a number, then Enter/v to view findings, tool output and
+report paths, or `r` to open the saved target/session. Opening a pentest restores
+its checkpoint; use `10` or `resume` to continue. Earlier reports without a
+checkpoint start from their first recorded unfinished/missing phase and retain
+their evidence; they cannot recreate unrecorded results.
 From the Linux shell, `cyber-jcode sessions` or `cyber-jcode --sessions` opens it directly.
-Browsing is read-only and preserves the active session, target and last result;
+Viewing is read-only and preserves the active session, target and last result;
 AI conversations/reasoning are never shown. `[9]` still starts a new session.
 
 Report dependencies are `python-docx`, Pillow and Chromium; the

@@ -20,7 +20,7 @@ from typing import Callable
 import unicodedata
 import uuid
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 ROOT = Path(__file__).resolve().parent.parent
 ANSI = re.compile(
     r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|"
@@ -450,7 +450,7 @@ class Backend:
                 text = await instructions.get()
                 identifier = "cyber-stdin-" + uuid.uuid4().hex
                 sent_instructions[identifier] = text
-                process.stdin.write((json.dumps({"type": "steer", "id": identifier, "text": text}) + "\n").encode())
+                process.stdin.write((json.dumps({"type": "steer", "id": identifier, "text": text}, ensure_ascii=False) + "\n").encode())
                 try:
                     await process.stdin.drain()
                 except (BrokenPipeError, ConnectionResetError):
@@ -622,11 +622,16 @@ class Console:
         self.width = max(8, shutil.get_terminal_size((80, 24)).columns - 1)
         self.last_path = self.settings.get("last_result")
         self.last_docx = self.settings.get("last_docx")
+        self.engagement_path = self.settings.get("engagement_path")
         self.pending_instructions = short_list(self.settings.get("pending_instructions"), 40, 16000)
         self._prompt_session = None
         self._input_draft = ""
+        self._restored_workspace = False
         if args.target is not None and args.target != self.settings.get("target", ""):
             self.pending_instructions = []
+            self.engagement_path = None
+        if args.provider or args.model is not None or getattr(args, "provider_profile", None):
+            self.engagement_path = None
 
     def line(self, text: str = "", color: str = ""):
         text = fit(text, self.width)
@@ -653,6 +658,7 @@ class Console:
             "verified_flags": self.verified_flags,
             "last_docx": self.last_docx,
             "pending_instructions": self.pending_instructions,
+            "engagement_path": self.engagement_path,
         })
 
     def banner(self):
@@ -685,6 +691,7 @@ class Console:
             self.line(row)
         self.line("-" * min(62, self.width), "32")
         self.line("  Enter a number or task.  menu | result | save | clear")
+        self.line("  Continue pentest: resume  |  Saved sessions: sessions")
         self.line("=" * min(62, self.width), "32")
 
     def ask(self, label: str) -> str:
@@ -708,11 +715,15 @@ class Console:
             self.line("[!] Enter an IP, hostname or URL.", "33")
             return
         if self.target != value:
+            if self._restored_workspace:
+                self.args.cwd = None
+                self._restored_workspace = False
             self.target = value
             self.session_id = None
             self.verified_flags = []
             self.last_path = None
             self.pending_instructions = []
+            self.engagement_path = None
         self.persist()
         self.line(f"[+] Target: {self.target}", "32")
 
@@ -783,6 +794,7 @@ class Console:
         ))[-40:]
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         report = {"target": self.target, "task": task, "label": label, "session_id": result.session_id,
+                  "workspace": str(self.workspace()),
                   "tools": result.tools, "summary": result.summary, "error": result.error,
                   "elapsed": round(result.elapsed, 1)}
         if phase:
@@ -928,6 +940,12 @@ class Console:
         if not choice.isdecimal() or not 1 <= int(choice) <= len(records):
             return
         path, record = records[int(choice) - 1]
+        action = self.ask("[Enter/v] View result | [r] Open session | [0] Back > ").lower()
+        if action == "0":
+            return
+        if action in ("r", "resume", "open"):
+            self.open_session(path, record)
+            return
         if "phases" in record:
             self.prose(f"{record.get('target')} | {len(record.get('phases', []))}/7 phases | "
                        f"{len(record.get('findings', []))} findings", "[+] ")
@@ -947,6 +965,29 @@ class Console:
             self.show_result(record)
         self.prose(str(path), "[+] Saved data: ", "32")
 
+    def open_session(self, path: Path, record: dict):
+        """Restore explicit history selection; browsing alone never changes state."""
+        self.target = str(record.get("target") or "")
+        self.session_id = record.get("session_id")
+        self.verified_flags = short_list(record.get("flags") or record.get("summary", {}).get("flags"), 40, 2048)
+        self.pending_instructions = short_list(record.get("pending_instructions"), 40, 16000)
+        self.last_path = str(path)
+        self.last_docx = record.get("docx_path")
+        self.engagement_path = str(path) if "phases" in record else None
+        self.args.cwd = record.get("workspace")
+        self._restored_workspace = bool(self.args.cwd)
+        self.persist()
+        self.line(f"[+] Session opened. Target: {self.target or 'not set'}", "32")
+        if not self.session_id:
+            self.line("[*] Evidence restored; no engine session ID was recorded.", "36")
+        if "phases" in record:
+            from cyber.engagement import next_phase
+            cursor = next_phase(record, PENTEST_PHASES)
+            if cursor < len(PENTEST_PHASES):
+                self.line(f"[+] Continue phase {cursor + 1}/7: {PENTEST_PHASES[cursor][1]}. Type 10 or resume.", "32")
+            else:
+                self.line("[*] All phases were processed. Enter a task or start a new engagement.", "36")
+
     def check_connection(self) -> bool:
         report = self.execute("Connection check: use bash to run only printf CYBER_OK. "
                                "Do not scan the network. Report Connection ready.", "CONNECTION")
@@ -959,12 +1000,17 @@ class Console:
             self.line("[!] Tool connection could not be verified.", "33")
         return success and confirmed
 
-    def run_pentest(self):
-        """Run the full engagement: phased methodology, then a DOCX report."""
+    def run_pentest(self, resume: bool = False):
+        """Run or continue a checkpointed engagement, then export its cumulative report."""
         if not self.target:
             self.line("[!] Set a target with [1] first.", "33")
             return False
         from cyber import report as report_module
+        from cyber.engagement import checkpoint_for, next_phase, prepare_resume, retain_phase
+        saved = checkpoint_for(self, PENTEST_PHASES)
+        if resume and saved is None:
+            self.line("[!] No unfinished pentest in this session. Open one through sessions.", "33")
+            return False
         self.line("=" * min(62, self.width), "36")
         self.line("  FULL PENTEST ENGAGEMENT", "36")
         self.line(f"  Target : {self.target}")
@@ -972,94 +1018,157 @@ class Console:
         self.line("           privesc -> post, then the DOCX report.")
         self.line("  Each phase can be stopped with Ctrl+C.", "36")
         self.line("=" * min(62, self.width), "36")
-        answer = self.ask("Start the engagement? (y/n) > ")
-        if answer.lower() not in ("y", "yes", "evet", "start", "baslat", "başlat"):
-            self.line("[*] Engagement cancelled.", "36")
-            return False
-        started = datetime.now(timezone.utc).isoformat()
-        run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-        evidence = self.workspace() / "evidence" / run_stamp
+        if saved and not resume:
+            cursor = next_phase(saved[1], PENTEST_PHASES)
+            self.line(f"[+] Saved progress: phase {cursor + 1}/7, {PENTEST_PHASES[cursor][1]}.", "32")
+            answer = self.ask("[Enter/1] Resume | [2] New engagement | [0] Back > ").lower()
+            if answer in ("0", "n", "no"):
+                return False
+            if answer in ("2", "new"):
+                saved = None
+                self.session_id = None
+                self.verified_flags = []
+                self.pending_instructions = []
+            elif answer not in ("", "1", "y", "yes", "resume"):
+                self.pending_instructions.append(answer)
+        if saved:
+            engagement_path, previous = saved
+            engagement = prepare_resume(previous, engagement_path, self.workspace(), PENTEST_PHASES)
+            self.session_id = engagement.get("session_id") or self.session_id
+            self.verified_flags = list(dict.fromkeys(self.verified_flags + engagement.get("flags", [])))
+            self.pending_instructions = list(dict.fromkeys(
+                engagement.get("pending_instructions", []) + self.pending_instructions))
+            self.args.cwd = engagement["workspace"]
+            self._restored_workspace = True
+            self.line("[+] Continuing the saved engagement; completed phases retained.", "32")
+        else:
+            answer = self.ask("Start the engagement? (y/n) > ")
+            if answer.lower() not in ("y", "yes", "evet", "start", "baslat", "başlat"):
+                self.line("[*] Engagement cancelled.", "36")
+                return False
+            run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+            engagement_path = self.state / "results" / f"pentest-{run_stamp}.json"
+            engagement = {"target": self.target, "started": datetime.now(timezone.utc).isoformat(),
+                          "run_stamp": run_stamp, "workspace": str(self.workspace()),
+                          "evidence_dir": str(self.workspace() / "evidence" / run_stamp),
+                          "phases": [], "phase_reports": [], "next_phase": 0, "skipped_phases": [],
+                          "findings": [], "tools": [], "screenshots": [], "flags": [], "limitations": []}
+        run_stamp = engagement["run_stamp"]
+        evidence = Path(engagement["evidence_dir"])
         private_dir(evidence)
-        engagement = {"target": self.target, "started": started, "phases": [],
-                      "findings": [], "tools": [], "screenshots": [], "flags": [], "limitations": []}
-        phase_reports: list[dict] = []
-        status_by_phase: dict[str, str] = {}
+        self.engagement_path = str(engagement_path)
+        phase_reports = engagement["phase_reports"]
+        status_by_phase = {p["phase"]: p.get("status", "partial") for p in engagement["phases"]}
+
+        def checkpoint(state="running"):
+            engagement.update(checkpoint_version=1, progress_state=state, status="partial",
+                              session_id=self.session_id, pending_instructions=list(self.pending_instructions),
+                              updated=datetime.now(timezone.utc).isoformat())
+            write_json(engagement_path, engagement)
+            self.persist()
+
+        checkpoint()
         skip_next_phase = False
-        for index, (phase, label, description) in enumerate(PENTEST_PHASES, start=1):
+        start_index = engagement["next_phase"]
+        for offset in range(start_index, len(PENTEST_PHASES)):
+            phase, label, description = PENTEST_PHASES[offset]
+            index = offset + 1
+            if phase in engagement["skipped_phases"] or (saved and status_by_phase.get(phase) == "ok"):
+                engagement["next_phase"] = index
+                checkpoint()
+                continue
             if skip_next_phase:
                 # The user answered "s" to skip this phase entirely.
                 skip_next_phase = False
                 self.line(f"[*] Phase {index}/{len(PENTEST_PHASES)} skipped: {label}", "36")
+                engagement["skipped_phases"].append(phase)
+                engagement["next_phase"] = index
+                checkpoint()
                 continue
+            engagement["next_phase"] = offset
+            checkpoint()
             self.line()
             self.line(f"[PHASE {index}/{len(PENTEST_PHASES)}] {label}", "36")
             # Continuity: earlier phases' compact outputs are the engagement context.
             context_parts = ["Prior verified flags: " + (", ".join(self.verified_flags) or "none")]
+            context_parts.append(f"Saved engagement JSON (text evidence only): {engagement_path}")
             context_parts.append(f"Capture real screenshot files only under: {evidence}. "
                                  "Never read the images. Capture helper JSON is the only model-visible result.")
             for prior in phase_reports:
                 prior_phase = prior.get("phase") or "prior"
                 context_parts.append(f"{prior_phase} phase status: {status_by_phase.get(prior_phase, 'partial')}; "
                                      f"key results: " + "; ".join(prior.get("summary", {}).get("findings", [])))
+            if any(p.get("phase") == phase for p in engagement["phases"]):
+                context_parts.append(
+                    "RESUME THE INTERRUPTED PHASE from its last unfinished step. Review the saved "
+                    "session, workspace notes and engagement JSON for exact recorded tool outputs. "
+                    "Do not repeat completed scans or steps with usable evidence. Previous processes "
+                    "may have stopped: verify any referenced shell, connection or background task "
+                    "before reusing it. Restore only lost access or unfinished commands as needed; "
+                    "do not restart reconnaissance. Images remain forbidden.")
             extra = "\n".join(context_parts)
             task = (f"Engagement phase: {label}. {description} "
                     "This phase is part of a larger authorized pentest engagement; previous "
                     "phases' results are summarized in the engagement context and files in "
                     "the workspace. Perform this phase completely with real tools.")
-            report = self.execute(task, f"PENTEST {index}/{len(PENTEST_PHASES)}: {label}",
-                                  phase=phase, extra_context=extra)
-            if report is None:  # stopped or failed to start; user decides whether to continue
-                answer = self.phase_answer("Phase interrupted. Continue with the next phase? (y/n or instruction) > ")
-                if answer.lower() not in ("y", "yes", "evet"):
-                    break
-                engagement["phases"].append({"phase": phase, "label": label,
-                                              "elapsed": 0, "status": "stopped"})
-                continue
-            phase_reports.append(report)
-            status_by_phase[phase] = str(report.get("summary", {}).get("status", "partial"))
-            engagement["phases"].append({
-                "phase": phase, "label": label, "elapsed": report.get("elapsed", 0),
-                "status": "stopped" if report.get("error") and report["error"] != "Operation stopped."
-                          else report.get("summary", {}).get("status", "partial")})
-            engagement["limitations"].extend(report.get("limitations", []))
-            if report.get("error"):
-                engagement["limitations"].append(f"{label}: {report['error']}")
-            for finding in report.get("engagement_findings") or []:
-                engagement["findings"].append(finding)
-            for tool in report.get("tools", []):
-                tool_entry = dict(tool)
-                tool_entry["phase"] = phase
-                engagement["tools"].append(tool_entry)
+            try:
+                report = self.execute(task, f"PENTEST {index}/{len(PENTEST_PHASES)}: {label}",
+                                      phase=phase, extra_context=extra)
+            except (KeyboardInterrupt, EOFError):
+                checkpoint("paused")
+                break
+            failed_to_start = report is None
+            if failed_to_start:
+                report = {"error": "Phase did not start.", "elapsed": 0,
+                          "summary": {"status": "stopped"}, "tools": []}
+            if report.get("session_id"):
+                self.session_id = report["session_id"]
+            retain_phase(engagement, report, phase, label)
+            status_by_phase[phase] = next(p["status"] for p in engagement["phases"] if p["phase"] == phase)
             engagement["flags"] = list(dict.fromkeys(
                 self.verified_flags + report.get("summary", {}).get("flags", [])))
             engagement["screenshots"].extend(report_module.collect_screenshots(
                 report.get("tools", []), evidence, phase=phase))
             status = report.get("summary", {}).get("status", "partial")
-            if status == "blocked":
-                answer = self.phase_answer("Phase reported BLOCKED. Continue to the next phase? (y/n or instruction) > ")
-                if answer.lower() not in ("y", "yes", "evet"):
-                    break
-            elif index < len(PENTEST_PHASES):
-                state_label = "Phase stopped" if report.get("error") else "Phase complete"
-                answer = self.phase_answer(f"{state_label}. Run phase {index + 1}/{len(PENTEST_PHASES)}: "
-                                  f"{PENTEST_PHASES[index][1]}? (y/n/s or instruction) > ")
-                if answer.lower() == "s":
-                    skip_next_phase = True
-                    continue
-                if answer.lower() not in ("y", "yes", "evet", ""):
-                    break
+            retry_current = bool(report.get("error")) or status == "blocked"
+            engagement["next_phase"] = offset if retry_current else index
+            checkpoint("paused")  # Save BEFORE asking; Ctrl+C at the question loses nothing.
+            if report.get("error") == "Operation stopped.":
+                self.line("[+] Pentest paused. Type 10 or resume to continue this phase.", "32")
+                break
+            try:
+                if retry_current:
+                    if index == len(PENTEST_PHASES):
+                        break
+                    answer = self.phase_answer("Phase blocked/stopped. Advance to the next phase? (y/n or instruction) > ")
+                elif index < len(PENTEST_PHASES):
+                    answer = self.phase_answer(f"Phase complete. Run phase {index + 1}/{len(PENTEST_PHASES)}: "
+                                              f"{PENTEST_PHASES[index][1]}? (y/n/s or instruction) > ")
+                else:
+                    answer = "y"
+            except (KeyboardInterrupt, EOFError):
+                checkpoint("paused")
+                break
+            if answer == "s":
+                skip_next_phase = True
+            elif answer not in ("y", "yes", "evet", ""):
+                break
+            engagement["next_phase"] = index
+            checkpoint()
         levels = {"user": 1, "administrator": 2, "root": 3, "system": 3}
         accesses = [p["access"] for p in phase_reports if p.get("access")]
         access = max(accesses, key=lambda item: levels.get(item["level"], 0), default=None)
         final_access = (f"Verified {access['level']} access on {access['target']}" if access
                         else "No verified target access recorded")
+        checkpoint("finished" if engagement["next_phase"] == len(PENTEST_PHASES) else "paused")
         engagement["finished"] = datetime.now(timezone.utc).isoformat()
         engagement["final_access"] = final_access
         engagement["session_id"] = self.session_id
         engagement["status"] = "complete" if len(engagement["phases"]) == 7 and all(
             p["status"] == "ok" for p in engagement["phases"]) else "partial"
         stamp = run_stamp
-        engagement_path = self.state / "results" / f"pentest-{stamp}.json"
+        self.last_path = str(engagement_path)
+        self.persist()
         write_json(engagement_path, engagement)
         try:
             docx_path = report_module.build_report(engagement, self.state / "reports" / f"pentest-{stamp}.docx")
@@ -1103,6 +1212,7 @@ class Console:
                 setattr(self, field_name, value or ("auto" if choice == "1" else ""))
                 self.session_id = None
                 self.verified_flags = []
+                self.engagement_path = None
                 self.persist()
                 self.line("[+] Saved.", "32")
             elif choice == "3":
@@ -1211,10 +1321,13 @@ class Console:
                     self.verified_flags = []
                     self.last_path = None
                     self.pending_instructions = []
+                    self.engagement_path = None
                     self.persist()
                     self.line("[+] New session ready.", "32")
                 elif choice in ("10", "pentest", "full", "tam"):
                     self.run_pentest()
+                elif choice in ("resume", "continue", "devam"):
+                    self.run_pentest(resume=True)
                 elif choice in ("11", "sessions", "history"):
                     self.session_history()
                 elif choice in ("save", "kaydet"):
