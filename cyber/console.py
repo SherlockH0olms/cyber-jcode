@@ -18,8 +18,9 @@ import sys
 import time
 from typing import Callable
 import unicodedata
+import uuid
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 ROOT = Path(__file__).resolve().parent.parent
 ANSI = re.compile(
     r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|"
@@ -195,6 +196,35 @@ def preview_rows(tool: dict) -> list[str]:
     return rows
 
 
+def tool_action(tool: dict) -> str:
+    """Plain action names; opaque model call identifiers stay in saved evidence."""
+    name = str(tool.get("name", "tool")).lower()
+    command = str(tool.get("command", ""))
+    if name in ("bash", "shell", "terminal", "bg"):
+        if "capture.py" in command:
+            return "Browser | Capture screenshot"
+        programs = {
+            "nmap": "Nmap | Port and service scan", "masscan": "Masscan | Port discovery",
+            "curl": "HTTP | Check response", "wget": "HTTP | Download resource",
+            "ffuf": "Ffuf | Discover web paths", "feroxbuster": "Feroxbuster | Discover web paths",
+            "gobuster": "Gobuster | Discover web paths", "whatweb": "WhatWeb | Identify web technologies",
+            "nuclei": "Nuclei | Check vulnerability templates", "nikto": "Nikto | Check web configuration",
+            "smbclient": "SMB | Enumerate shares", "enum4linux": "SMB | Enumerate host information",
+            "nxc": "NetExec | Check network service access", "netexec": "NetExec | Check network service access",
+            "searchsploit": "Searchsploit | Search exploit references", "whoami": "Identity | Check current user",
+        }
+        for program, label in programs.items():
+            if re.search(r"(?:^|[\s;&|])(?:/[\w./-]+/)?" + re.escape(program) + r"(?=[\s;&|]|$)", command):
+                return label
+        if str(tool.get("output", "")).startswith("Starting Nmap"):
+            return programs["nmap"]
+        return "Background | Task results" if name == "bg" else "Shell | Run command"
+    return {"read": "File | Read evidence", "write": "File | Save evidence",
+            "edit": "File | Update evidence", "grep": "Files | Search content",
+            "glob": "Files | Search names", "webfetch": "HTTP | Fetch page",
+            "websearch": "Search | Find references"}.get(name, "Tool | " + clean(name))
+
+
 def private_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.chmod(0o700)
@@ -282,6 +312,7 @@ class RunResult:
     error: str | None = None
     elapsed: float = 0.0
     raw_text: str = ""
+    pending_instructions: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -363,7 +394,9 @@ class Backend:
                   progress: Callable[[RunProgress], None] | None = None,
                   greeting: bool = False,
                   on_tool: Callable[[dict], None] | None = None,
-                  capture_tools: bool = False) -> RunResult:
+                  capture_tools: bool = False,
+                  instructions: asyncio.Queue[str] | None = None,
+                  on_instruction: Callable[[str], None] | None = None) -> RunResult:
         result = RunResult(session_id=session_id)
         self.interrupted_result = None
         if not self.binary.is_file():
@@ -375,6 +408,8 @@ class Backend:
         workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
         cmd = self.command(provider, model, profile)
         env = self.environment()
+        if instructions is not None:
+            env["JCODE_RUN_STDIN_STEERING"] = "1"
         if greeting:
             cmd.extend(["--tool-profile", "none"])
             env["JCODE_RUN_AUTO_POKE"] = "0"
@@ -398,7 +433,8 @@ class Backend:
         update()
         process = await asyncio.create_subprocess_exec(
             *cmd, env=env, cwd=workspace,
-            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.PIPE if instructions is not None else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, start_new_session=True,
             limit=16 * 1024 * 1024,
         )
@@ -406,6 +442,21 @@ class Backend:
         done = False
         input_id = None
         tool_inputs = {}
+        background_commands = {}
+        sent_instructions = {}
+
+        async def send_instructions():
+            while True:
+                text = await instructions.get()
+                identifier = "cyber-stdin-" + uuid.uuid4().hex
+                sent_instructions[identifier] = text
+                process.stdin.write((json.dumps({"type": "steer", "id": identifier, "text": text}) + "\n").encode())
+                try:
+                    await process.stdin.drain()
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+
+        sender = asyncio.create_task(send_instructions()) if instructions is not None else None
 
         async def drain_errors():
             nonlocal stderr_tail
@@ -423,6 +474,14 @@ class Backend:
                 if not isinstance(event, dict):
                     continue
                 kind = event.get("type")
+                if kind == "steering_queued" and on_instruction:
+                    on_instruction("queued")
+                elif kind == "soft_interrupt_injected":
+                    applied = False
+                    for identifier in event.get("client_ids", []):
+                        applied |= sent_instructions.pop(identifier, None) is not None
+                    if applied and on_instruction:
+                        on_instruction("applied")
                 if capture_tools and kind == "tool_start":
                     input_id = str(event.get("id") or event.get("name", "tool")) if visible_tool(str(event.get("name", ""))) else None
                     if input_id:
@@ -472,6 +531,13 @@ class Backend:
                                     tool["command"] = clean(parameters["command"])[:16000]
                             except ValueError:
                                 pass
+                        bg_id = background_started(output)
+                        if bg_id and tool.get("command"):
+                            background_commands[bg_id] = tool["command"]
+                        if name == "bg":
+                            task = re.search(r"^Task: ([\w-]+)$", output, re.M)
+                            if task and task[1] in background_commands:
+                                tool["command"] = background_commands[task[1]]
                         result.tools.append(tool)
                         if not capture_tools:
                             result.tools = result.tools[-200:]
@@ -502,6 +568,14 @@ class Backend:
             self.interrupted_result = result
             raise
         finally:
+            if sender:
+                sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
+                result.pending_instructions = list(sent_instructions.values())
+                while not instructions.empty():
+                    result.pending_instructions.append(instructions.get_nowait())
+                if process.stdin:
+                    process.stdin.close()
             ticker.cancel()
             await asyncio.gather(ticker, return_exceptions=True)
             if process.returncode is None:
@@ -548,6 +622,11 @@ class Console:
         self.width = max(8, shutil.get_terminal_size((80, 24)).columns - 1)
         self.last_path = self.settings.get("last_result")
         self.last_docx = self.settings.get("last_docx")
+        self.pending_instructions = short_list(self.settings.get("pending_instructions"), 40, 16000)
+        self._prompt_session = None
+        self._input_draft = ""
+        if args.target is not None and args.target != self.settings.get("target", ""):
+            self.pending_instructions = []
 
     def line(self, text: str = "", color: str = ""):
         text = fit(text, self.width)
@@ -573,6 +652,7 @@ class Console:
             "profile": self.profile, "session_id": self.session_id, "last_result": self.last_path,
             "verified_flags": self.verified_flags,
             "last_docx": self.last_docx,
+            "pending_instructions": self.pending_instructions,
         })
 
     def banner(self):
@@ -608,7 +688,19 @@ class Console:
         self.line("=" * min(62, self.width), "32")
 
     def ask(self, label: str) -> str:
+        if self._prompt_session is not None and sys.stdin.isatty():
+            draft, self._input_draft = self._input_draft, ""
+            return self._prompt_session.prompt(fit(label, self.width), default=draft).strip()
         return input(fit(label, self.width)).strip()
+
+    def phase_answer(self, label: str) -> str:
+        answer = self.ask(label)
+        if answer.lower() in ("y", "yes", "evet", "", "n", "no", "s"):
+            return answer.lower()
+        self.pending_instructions.append(answer)
+        self.persist()
+        self.line("[+] Instruction saved; continuing to the next phase.", "32")
+        return "y"
 
     def set_target(self, value: str):
         value = clean(value).strip()
@@ -620,6 +712,7 @@ class Console:
             self.session_id = None
             self.verified_flags = []
             self.last_path = None
+            self.pending_instructions = []
         self.persist()
         self.line(f"[+] Target: {self.target}", "32")
 
@@ -634,6 +727,8 @@ class Console:
         context = f"Target: {self.target or '(not set)'}\nWorkspace: {self.workspace()}"
         if self.verified_flags:
             context += "\nVerified flags so far: " + ", ".join(self.verified_flags)
+        if self.pending_instructions:
+            context += "\nADDITIONAL USER INSTRUCTIONS (apply within the current lab scope):\n" + "\n".join(self.pending_instructions)
         if task_label.startswith("PENTEST"):
             policy += "\n\nMANDATORY REPORTING HANDBOOK — apply before writing report data:\n" + (
                 ROOT / "cyber/reporting-handbook.md").read_text(encoding="utf-8")
@@ -665,17 +760,11 @@ class Console:
             display.finish()
             self.show_tool(tool)
         try:
-            result = asyncio.run(self.backend.run(
-                prompt, self.workspace(), self.session_id,
-                self.provider, self.model, self.profile,
-                self.verified_flags, progress=display,
-                on_tool=on_tool if phase else None, capture_tools=bool(phase),
-            ))
+            from cyber.live import run_with_input
+            result = asyncio.run(run_with_input(self, prompt, label, phase, display, on_tool))
         except KeyboardInterrupt:
             display.finish()
             self.line("[!] Operation stopped.", "33")
-            if not phase:
-                return None
             result = self.backend.interrupted_result or RunResult(error="Operation stopped.")
         except (OSError, ValueError):
             display.finish()
@@ -684,6 +773,10 @@ class Console:
                 return None
             result = RunResult(error="Could not start the phase.")
         display.finish()
+        if not result.error:
+            self.pending_instructions = result.pending_instructions
+        else:
+            self.pending_instructions.extend(result.pending_instructions)
         self.session_id = result.session_id
         self.verified_flags = list(dict.fromkeys(
             self.verified_flags + result.summary.get("flags", [])
@@ -747,7 +840,8 @@ class Console:
         visible = display_tool(tool)
         if visible is None:
             return
-        self.line(f"[{'!' if visible['error'] else '+'}] {tool.get('id', '')} {visible['name']}", "33" if visible["error"] else "32")
+        action = tool_action(dict(tool, name=visible["name"], output=visible["output"]))
+        self.line(f"[{'!' if visible['error'] else '+'}] {action}", "33" if visible["error"] else "32")
         rows = visible["output"].splitlines() if self.args.full_output else preview_rows(visible)
         for row in (rows if self.args.full_output else rows[:16]):
             self.line("    " + row)
@@ -757,7 +851,8 @@ class Console:
     def show_result(self, report: dict, all_outputs: bool = False, hide_tools: bool = False):
         self.line()
         summary = report.get("summary", {})
-        status = "FAILED" if report.get("error") else str(summary.get("status", "partial")).upper()
+        status = ("STOPPED" if report.get("error") == "Operation stopped." else
+                  "FAILED" if report.get("error") else str(summary.get("status", "partial")).upper())
         elapsed = report.get("elapsed", 0)
         duration = f"{int(elapsed) // 60}m {int(elapsed) % 60:02d}s" if elapsed >= 60 else f"{elapsed:.1f}s"
         self.line("=" * min(62, self.width), "32")
@@ -779,13 +874,14 @@ class Console:
             for finding in findings:
                 self.prose(f"{finding['severity'].upper()}: {finding['title']} "
                            f"({finding['category']})", "[V] ", "35")
-        tools = [] if hide_tools else [visible for tool in report.get("tools", []) if (visible := display_tool(tool)) is not None]
+        tools = [] if hide_tools else [dict(visible, action=tool_action(dict(tool, name=visible["name"], output=visible["output"])))
+                                      for tool in report.get("tools", []) if (visible := display_tool(tool)) is not None]
         if tools:
             self.line("-" * min(62, self.width), "32")
             self.line(f"  TOOL OUTPUTS | {len(tools)} results", "36")
         shown = tools if (self.args.full_output or all_outputs) else tools[-8:]
         for tool in shown:
-            self.line(f"[{'!' if tool['error'] else '+'}] {tool['name']}", "33" if tool["error"] else "32")
+            self.line(f"[{'!' if tool['error'] else '+'}] {tool['action']}", "33" if tool["error"] else "32")
             rows = tool["output"].splitlines() if (self.args.full_output or all_outputs) else preview_rows(tool)
             visible = rows if (self.args.full_output or all_outputs) else rows[:16]
             for row in visible:
@@ -913,7 +1009,7 @@ class Console:
             report = self.execute(task, f"PENTEST {index}/{len(PENTEST_PHASES)}: {label}",
                                   phase=phase, extra_context=extra)
             if report is None:  # stopped or failed to start; user decides whether to continue
-                answer = self.ask("Phase interrupted. Continue with the next phase? (y/n) > ")
+                answer = self.phase_answer("Phase interrupted. Continue with the next phase? (y/n or instruction) > ")
                 if answer.lower() not in ("y", "yes", "evet"):
                     break
                 engagement["phases"].append({"phase": phase, "label": label,
@@ -940,12 +1036,13 @@ class Console:
                 report.get("tools", []), evidence, phase=phase))
             status = report.get("summary", {}).get("status", "partial")
             if status == "blocked":
-                answer = self.ask("Phase reported BLOCKED. Continue to the next phase? (y/n) > ")
+                answer = self.phase_answer("Phase reported BLOCKED. Continue to the next phase? (y/n or instruction) > ")
                 if answer.lower() not in ("y", "yes", "evet"):
                     break
             elif index < len(PENTEST_PHASES):
-                answer = self.ask(f"Phase complete. Run phase {index + 1}/{len(PENTEST_PHASES)}: "
-                                  f"{PENTEST_PHASES[index][1]}? (y/n/s = skip it) > ")
+                state_label = "Phase stopped" if report.get("error") else "Phase complete"
+                answer = self.phase_answer(f"{state_label}. Run phase {index + 1}/{len(PENTEST_PHASES)}: "
+                                  f"{PENTEST_PHASES[index][1]}? (y/n/s or instruction) > ")
                 if answer.lower() == "s":
                     skip_next_phase = True
                     continue
@@ -1113,6 +1210,7 @@ class Console:
                     self.session_id = None
                     self.verified_flags = []
                     self.last_path = None
+                    self.pending_instructions = []
                     self.persist()
                     self.line("[+] New session ready.", "32")
                 elif choice in ("10", "pentest", "full", "tam"):

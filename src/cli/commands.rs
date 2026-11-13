@@ -15,6 +15,7 @@ mod menubar;
 mod provider_setup;
 mod report_info;
 mod restart;
+mod stdin_steering;
 
 pub(crate) use super::auth_test::run_post_login_validation;
 #[cfg(test)]
@@ -3109,6 +3110,9 @@ async fn run_single_message_command_ndjson(
     message: &str,
 ) -> Result<()> {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut steering = (std::env::var("JCODE_RUN_STDIN_STEERING").as_deref() == Ok("1"))
+        .then(|| stdin_steering::StdinSteering::start(agent.soft_interrupt_queue()));
+    let mut steering_open = steering.is_some();
     let session_id = agent.session_id().to_string();
     let provider_name =
         run_report_provider_name(provider.as_ref(), agent.session_provider_key().as_deref());
@@ -3145,6 +3149,12 @@ async fn run_single_message_command_ndjson(
             let mut run_result: Option<Result<()>> = None;
             loop {
                 tokio::select! {
+                    notice = async { steering.as_mut().unwrap().notices.recv().await }, if steering_open => {
+                        match notice {
+                            Some(notice) => write_json_line(&mut stdout, &notice)?,
+                            None => steering_open = false,
+                        }
+                    }
                     result = &mut run_future, if run_result.is_none() => {
                         run_result = Some(result);
                     }
@@ -3318,6 +3328,17 @@ async fn run_single_message_command_ndjson(
         }
     }
 
+    if let Some(steering) = &steering {
+        let pending = steering.stop_and_take_pending();
+        if !pending.is_empty() {
+            write_json_line(
+                &mut stdout,
+                &serde_json::json!({
+                    "type": "steering_deferred", "client_ids": pending,
+                }),
+            )?;
+        }
+    }
     match result {
         Ok(()) => {
             write_json_line(

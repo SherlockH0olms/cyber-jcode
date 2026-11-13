@@ -16,7 +16,8 @@ Install the build tools and report dependencies:
 ```bash
 sudo apt update
 sudo apt install -y git curl ca-certificates build-essential pkg-config \
-  libssl-dev perl cmake python3 python3-docx python3-pil fonts-dejavu-core chromium
+  libssl-dev perl cmake python3 python3-docx python3-pil python3-prompt-toolkit \
+  fonts-dejavu-core chromium
 ```
 
 Install the current stable Rust toolchain if Rust is not already installed:
@@ -125,6 +126,13 @@ Choose `1` to set a target, `2` for service discovery, `3` for web discovery,
 the seven-phase full pentest and DOCX report. Enter a custom task at the
 same `cyber >` prompt. `menu`, `result`, `save`, `clear` and `new` are also
 available. Choose `0` to exit; `Ctrl+C` stops the current task.
+
+While a task runs, an editable `cyber >` prompt stays open. Type additional
+instructions and press Enter; the engine applies them in the same session at
+the next safe point without cancelling active tools. `/stop` or Ctrl+C explicitly
+stops the task. Text entered at a phase transition becomes an instruction for
+the next phase; it does not end the engagement. Tool headings use plain English
+action names, while complete source identifiers remain in the saved evidence.
 
 ```bash
 cyber-jcode --target 10.10.10.10

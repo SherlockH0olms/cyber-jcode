@@ -50,6 +50,20 @@ cyber-jcode --full-output
 
 ## Full pentest engagement
 
+During task execution, the `cyber >` input stays editable. Enter a clue or
+instruction normally; do not press Ctrl+C to add information. The headless
+engine receives text through its non-urgent soft-interrupt queue and applies
+it at the next safe point while keeping active commands running. The console
+prints a short acknowledgement when queued and applied. Last-moment messages
+continue in the same session rather than being discarded at task completion.
+`/stop` or Ctrl+C explicitly stops execution and retains captured output.
+`python3-prompt-toolkit` provides input editing and output redrawing.
+
+Phase questions accept y/Enter, n and s as before. Any other text is preserved
+as an additional instruction and the engagement continues to the next phase.
+Opaque model call IDs are kept in evidence files; terminal headings display
+actions such as `Nmap | Port and service scan` and `File | Save evidence`.
+
 `10` (or `--pentest`) runs an authorized-lab engagement through seven ordered
 phases. Each phase is a real agent turn: prior phase results travel forward as
 engagement context, and the console asks before each next phase (Enter or y =

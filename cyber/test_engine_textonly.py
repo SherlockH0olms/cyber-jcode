@@ -21,6 +21,7 @@ class EngineTextOnlyTests(unittest.TestCase):
         requests = []
         image_path = None
         emitted_read = False
+        slow_mode = False
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *unused):
@@ -40,9 +41,11 @@ class EngineTextOnlyTests(unittest.TestCase):
                 requests.append(data)
                 if data.get("tools") and not emitted_read:
                     emitted_read = True
+                    function = ({"name": "bash", "arguments": json.dumps({"command":
+                        "python3 -c 'import time; time.sleep(1.2); print(\"OWNED_TOOL_COMPLETED\")'"})}
+                        if slow_mode else {"name": "read", "arguments": json.dumps({"file_path": str(image_path)})})
                     message = {"role": "assistant", "content": None, "tool_calls": [{
-                        "id": "call_image_read", "type": "function", "function": {
-                            "name": "read", "arguments": json.dumps({"file_path": str(image_path)})}}]}
+                        "id": "call_slow_tool" if slow_mode else "call_image_read", "type": "function", "function": function}]}
                     delta = {"tool_calls": [dict(message["tool_calls"][0], index=0)]}
                     finish = "tool_calls"
                 else:
@@ -109,6 +112,35 @@ class EngineTextOnlyTests(unittest.TestCase):
                 persisted = json.loads(path.read_text())
                 self.assertTrue(any(block.get("data") == "PRIVATE_LEGACY_IMAGE"
                     for message in persisted["messages"] for block in message["content"]))
+
+                emitted_read = False
+                slow_mode = True
+                notices = []
+                async def verify_live_steering():
+                    instructions = asyncio.Queue()
+                    active = asyncio.Event()
+                    def progress(state):
+                        if "bash" in state.active.values():
+                            active.set()
+                    task = asyncio.create_task(backend.run("Continue the same local test with real tool output.",
+                        root / "workspace", result.session_id, "openai-compatible", "text-only-test-model", "local-image-test",
+                        progress=progress, instructions=instructions, on_instruction=notices.append, capture_tools=True))
+                    try:
+                        await asyncio.wait_for(active.wait(), 15)
+                        await asyncio.sleep(0.3)
+                        await instructions.put("LIVE_STEERING_CLUE: retain the current work and continue.")
+                        return await asyncio.wait_for(task, 30)
+                    finally:
+                        if not task.done():
+                            task.cancel()
+                            await asyncio.gather(task, return_exceptions=True)
+                steered = asyncio.run(verify_live_steering())
+                self.assertIsNone(steered.error, steered.error)
+                self.assertEqual(steered.session_id, result.session_id)
+                self.assertTrue(any("OWNED_TOOL_COMPLETED" in tool["output"] and not tool["error"] for tool in steered.tools))
+                self.assertIn("LIVE_STEERING_CLUE", json.dumps(requests))
+                self.assertIn("applied", notices)
+                self.assertEqual(steered.pending_instructions, [])
             finally:
                 server.shutdown()
                 server.server_close()
