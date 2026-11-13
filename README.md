@@ -161,6 +161,27 @@ record and choose Enter to view it or `r` to open that session. Then use `10`
 or `resume` to continue its pentest. Viewing alone preserves the active session.
 See [the console guide](cyber/README.md).
 
+## Skull: native chat
+
+Choose `[12] Skull` or type `skull` at `cyber >` to open Jcode's native
+interactive chat. Tool calls, tool results and assistant answers use the normal
+Jcode interface; thinking text stays hidden. `/quit` returns to the menu and
+`/resume` opens the native chat history. A target is not required.
+
+```bash
+cyber-jcode skull
+cyber-jcode --skull --provider-profile my-api
+```
+
+Skull uses Cyber-Jcode's existing model connection, a private engine socket
+per launch and a new chat session. Its default workspace is `~/.cyber-jcode/skull/workspace`;
+`--cwd` selects another directory. The menu's target, pentest checkpoint, last
+result and active session are preserved. Thinking is hidden only in this child
+interface, without changing model reasoning or saved display settings. The
+existing image-input guard remains enabled. Skull requires a real terminal.
+Its private daemon stops when the interface exits, so a later launch picks up
+the current connection settings. Saved chats remain available through `/resume`.
+
 ## Isolation and updates
 
 The public command is `cyber-jcode`. The internal binary remains named

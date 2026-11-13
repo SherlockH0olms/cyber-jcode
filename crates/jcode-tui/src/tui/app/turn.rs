@@ -938,7 +938,7 @@ impl App {
                                         // paced through the same segment-aware StreamBuffer as the
                                         // answer text, so ordering is preserved without flushing
                                         // and bursts trickle in smoothly.
-                                        if config().display.reasoning_enabled() {
+                                        if crate::tui::reasoning_visibility::visible() {
                                             let ops = self.stream_buffer.push_reasoning(&thinking_text);
                                             self.apply_stream_ops(ops);
                                         }
@@ -960,7 +960,7 @@ impl App {
                                         self.broadcast_debug(crate::tui::backend::DebugEvent::ThinkingEnd);
                                     }
                                     StreamEvent::ThinkingDone { duration_secs: _ } => {
-                                        if config().display.reasoning_enabled() {
+                                        if crate::tui::reasoning_visibility::visible() {
                                             // Queue the region close behind any still-buffered
                                             // reasoning so it lands exactly after the final
                                             // reasoning character reveals.

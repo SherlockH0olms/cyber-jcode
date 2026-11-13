@@ -568,7 +568,7 @@ fn handle_server_event_inner(
             // this client's choice (mirroring the local-turn path, which gates
             // on the same config). Hidden reasoning still drives the status
             // line and stall-guard activity above.
-            if crate::config::config().display.reasoning_enabled() {
+            if crate::tui::reasoning_visibility::visible() {
                 let ops = app.stream_buffer.push_reasoning(&text);
                 app.apply_stream_ops(ops);
             }

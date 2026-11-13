@@ -76,6 +76,8 @@ fn stored_message_visible_text(message: &crate::session::StoredMessage) -> Strin
     let mut parts = Vec::new();
     for block in &message.content {
         match block {
+            ContentBlock::Reasoning { .. } | ContentBlock::ReasoningTrace { .. }
+                if crate::tui::reasoning_visibility::hidden() => {}
             ContentBlock::Text { text, .. }
             | ContentBlock::Reasoning { text }
             | ContentBlock::ReasoningTrace { text } => {

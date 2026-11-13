@@ -3431,6 +3431,14 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
         .unwrap_or_default()
         .trim();
 
+    if crate::tui::reasoning_visibility::hidden() {
+        app.push_display_message(DisplayMessage::system(
+            "Skull keeps thinking text hidden. Use /effort to change model reasoning effort."
+                .to_string(),
+        ));
+        return true;
+    }
+
     if rest.is_empty() || matches!(rest, "show" | "status") {
         let current = crate::config::config().display.reasoning_display();
         app.push_display_message(DisplayMessage::system(format!(

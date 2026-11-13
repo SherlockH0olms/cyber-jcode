@@ -167,10 +167,11 @@ pub(crate) fn render_assistant_message(
 ) -> Vec<Line<'static>> {
     let centered = markdown::center_code_blocks();
     let wrap_width = centered_wrap_width(width, centered, 96);
-    let mut lines = if let Some(segments) = split_plan_segments(&msg.content) {
+    let content = crate::tui::reasoning_visibility::assistant_text(&msg.content);
+    let mut lines = if let Some(segments) = split_plan_segments(&content) {
         render_assistant_segments(&segments, width, wrap_width)
     } else {
-        markdown::render_markdown_with_width(&msg.content, Some(wrap_width))
+        markdown::render_markdown_with_width(&content, Some(wrap_width))
     };
     if centered {
         markdown::recenter_structured_blocks_for_display(&mut lines, width as usize);
@@ -201,6 +202,9 @@ pub(crate) fn render_reasoning_message(
     width: u16,
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    if crate::tui::reasoning_visibility::hidden() {
+        return Vec::new();
+    }
     let centered = markdown::center_code_blocks();
     let wrap_width = centered_wrap_width(width, centered, 96);
     let mut lines = markdown::render_markdown_with_width(&msg.content, Some(wrap_width));

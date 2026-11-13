@@ -48,6 +48,30 @@ cyber-jcode --provider-profile my-api
 cyber-jcode --full-output
 ```
 
+## Skull native chat
+
+Choose `12` or enter `skull` to open the normal Jcode conversation interface.
+Thinking text is hidden, including retained thinking in restored chat history;
+tool calls, their results and assistant answers remain visible. Model reasoning
+still runs normally in the background. `/quit` returns to the Cyber-Jcode menu;
+`/resume` opens Jcode's chat history. No lab target is required.
+
+`cyber-jcode skull` or `cyber-jcode --skull` opens this mode directly from the
+Linux terminal. It uses the configured Cyber-Jcode provider/model/profile and
+a private socket per launch and a new chat session. Its daemon stops on exit,
+so later launches use updated connection settings. The default working directory is
+`~/.cyber-jcode/skull/workspace`, or the directory selected with `--cwd`.
+Skull preserves the menu's current session, target, report and pentest checkpoint.
+The thinking override applies only to Skull's child process and does not save
+display changes; the image-input guard remains enabled.
+
+The optional compiled-engine test uses a local fake API and a terminal emulator;
+it does not contact lab targets. In a test environment with `pyte` installed, run:
+
+```bash
+CYBER_JCODE_TEST_ENGINE=1 python3 -m unittest cyber.test_skull_engine -v
+```
+
 ## Full pentest engagement
 
 During task execution, the `cyber >` input stays editable. Enter a clue or

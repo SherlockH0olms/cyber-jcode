@@ -20,7 +20,7 @@ from typing import Callable
 import unicodedata
 import uuid
 
-VERSION = "0.4.2"
+VERSION = "0.5.0"
 ROOT = Path(__file__).resolve().parent.parent
 ANSI = re.compile(
     r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|"
@@ -388,6 +388,22 @@ class Backend:
             cmd.extend(["--provider-profile", profile])
         return cmd
 
+    def skull_environment(self, socket: Path | None = None) -> dict[str, str]:
+        env = self.environment()
+        env["JCODE_SOCKET"] = str(socket or self.state / "run/skull-textonly-v1.sock")
+        env["JCODE_TUI_HIDE_THINKING"] = "1"
+        # The native TUI controls its own colors; respect an explicit user setting.
+        if "NO_COLOR" not in os.environ:
+            env.pop("NO_COLOR", None)
+        return env
+
+    def skull_command(self, provider: str, model: str, profile: str, workspace: Path,
+                      socket: Path | None = None) -> list[str]:
+        cmd = self.command(provider, model, profile)
+        cmd.remove("--quiet")
+        cmd[cmd.index("--socket") + 1] = str(socket or self.state / "run/skull-textonly-v1.sock")
+        return cmd + ["--cwd", str(workspace)]
+
     async def run(self, prompt: str, workspace: Path, session_id: str | None,
                   provider: str, model: str, profile: str = "",
                   verified_flags: list[str] | None = None,
@@ -686,7 +702,7 @@ class Console:
             "  [4] Review vulnerabilities", "  [5] Find flags", "  [6] Analyze file",
             "  [7] Show last result", "  [8] Settings", "  [9] New session",
             "  [10] Full pentest (recon to root) + DOCX report",
-            "  [11] Session history", "  [0] Exit",
+            "  [11] Session history", "  [12] Skull (native chat, thinking hidden)", "  [0] Exit",
         ):
             self.line(row)
         self.line("-" * min(62, self.width), "32")
@@ -699,6 +715,54 @@ class Console:
             draft, self._input_draft = self._input_draft, ""
             return self._prompt_session.prompt(fit(label, self.width), default=draft).strip()
         return input(fit(label, self.width)).strip()
+
+    def skull(self) -> int:
+        if not self.backend.binary.is_file():
+            self.line("[!] Engine missing. Complete setup with cyber/install.py.", "33")
+            return 1
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            self.line("[!] Skull requires an interactive terminal.", "33")
+            return 1
+        for path in (self.state / "engine", self.state / "run"):
+            private_dir(path)
+        workspace = (Path(self.args.cwd).expanduser().resolve() if self.args.cwd
+                     else self.state / "skull/workspace")
+        workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.persist()
+        self.line("[*] Skull: native chat. Thinking hidden; tools and answers visible.", "36")
+        self.line("[*] Use /quit to return to Cyber-Jcode. Use /resume for chat history.", "36")
+        # Each launch starts with the current connection settings. Reusing a
+        # native daemon would silently ignore later provider/model CLI options.
+        socket = self.state / "run" / f"skull-{uuid.uuid4().hex[:10]}.sock"
+        env = self.backend.skull_environment(socket)
+        command = self.backend.skull_command(self.provider, self.model, self.profile, workspace, socket)
+        if self.args.no_color:
+            env["NO_COLOR"] = "1"
+        previous_sigint = signal.getsignal(signal.SIGINT)
+        # Let the native UI handle Ctrl+C. The waiting menu must not regain the
+        # terminal while Jcode is still stopping a turn or restoring the screen.
+        signal.signal(signal.SIGINT, lambda *_: None)
+        try:
+            # Pass the terminal directly to Jcode. No headless/JSON result policy.
+            code = subprocess.run(command, env=env, check=False).returncode
+        except KeyboardInterrupt:
+            code = 130
+        except OSError:
+            self.line("[!] Could not start the Skull interface.", "33")
+            return 1
+        finally:
+            try:
+                # This socket belongs only to this Skull launch, never to a lab
+                # operation or an independently opened Skull interface.
+                subprocess.run(command + ["server", "stop"], env=env, check=False,
+                               capture_output=True, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            signal.signal(signal.SIGINT, previous_sigint)
+        self.line("[*] Returned to Cyber-Jcode.", "36")
+        if code not in (0, 130, -signal.SIGINT):
+            self.line(f"[!] Skull exited with status {code}.", "33")
+        return code
 
     def phase_answer(self, label: str) -> str:
         answer = self.ask(label)
@@ -1330,6 +1394,9 @@ class Console:
                     self.run_pentest(resume=True)
                 elif choice in ("11", "sessions", "history"):
                     self.session_history()
+                elif choice in ("12", "skull"):
+                    self.skull()
+                    self.menu()
                 elif choice in ("save", "kaydet"):
                     self.save_result()
                 elif choice in ("clear", "temizle"):
@@ -1373,6 +1440,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv == ["sessions"]:
         argv = ["--sessions"]
+    elif argv == ["skull"]:
+        argv = ["--skull"]
     parser = argparse.ArgumentParser(
         prog="cyber-jcode", description="TryHackMe lab terminal",
         epilog="Jcode configuration commands: cyber-jcode provider|model|auth|login ...",
@@ -1392,6 +1461,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--pentest", action="store_true",
                       help="Run the full phased pentest engagement and produce a DOCX report")
     mode.add_argument("--sessions", action="store_true", help="Browse saved sessions and report paths")
+    mode.add_argument("--skull", action="store_true", help="Open native Jcode chat with thinking hidden")
     forwarded = bool(argv and argv[0] in ("provider", "model", "auth", "login"))
     args = None if forwarded else parser.parse_args(argv)
     state = Path(os.environ.get("CYBER_JCODE_HOME", str(Path.home() / ".cyber-jcode"))).expanduser().resolve()
@@ -1403,6 +1473,8 @@ def main(argv: list[str] | None = None) -> int:
         if forwarded:
             return forward_command(state, argv)
         console = Console(state, args)
+        if args.skull:
+            return console.skull()
         if args.pentest:
             return 0 if console.run_pentest() else 1
         return console.loop()
